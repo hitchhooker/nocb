@@ -1,0 +1,32 @@
+# Maintainer: hitchhooker <your.email@example.com>
+pkgname=nocb
+pkgver=0.2.0
+pkgrel=1
+pkgdesc="X11 clipboard manager with compression and blob storage"
+arch=("x86_64")
+url="https://github.com/hitchhooker/nocb"
+license=("MIT")
+depends=("libx11" "libxcb" "sqlite")
+makedepends=("cargo")
+source=("$pkgname-$pkgver.tar.gz::https://github.com/hitchhooker/nocb/archive/v$pkgver.tar.gz")
+sha256sums=("SKIP")
+
+prepare() {
+ cd "$pkgname-$pkgver"
+ export RUSTUP_TOOLCHAIN=stable
+ cargo fetch --locked --target "$CARCH-unknown-linux-gnu"
+}
+
+build() {
+ cd "$pkgname-$pkgver"
+ export RUSTUP_TOOLCHAIN=stable
+ export CARGO_TARGET_DIR=target
+ cargo build --frozen --release --all-features
+}
+
+package() {
+ cd "$pkgname-$pkgver"
+ install -Dm755 "target/release/$pkgname" "$pkgdir/usr/bin/$pkgname"
+ install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+ install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
