@@ -44,7 +44,7 @@ jobs:
 
       - name: Build nocb binary
         run: |
-          cargo build --release --bin nocb --target ${{ matrix.target }}
+          cargo build --release --target ${{ matrix.target }}
         shell: bash
 
       - name: Prepare binary
