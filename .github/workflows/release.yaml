@@ -13,9 +13,6 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             name: nocb-linux-x64
-          # - os: ubuntu-latest
-          #   target: aarch64-unknown-linux-gnu
-          #   name: nocb-linux-arm64
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -29,12 +26,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
-      - name: Install cross for ARM64 builds
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          curl -L https://github.com/cross-rs/cross/releases/latest/download/cross-x86_64-unknown-linux-gnu.tar.gz | tar xz
-          sudo mv cross /usr/local/bin/
 
       - name: Install dependencies (Linux x64)
         if: matrix.os == 'ubuntu-latest' && matrix.target == 'x86_64-unknown-linux-gnu'
@@ -53,11 +44,7 @@ jobs:
 
       - name: Build nocb binary
         run: |
-          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ] && [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
-            cross build --release --bin nocb --target ${{ matrix.target }}
-          else
-            cargo build --release --bin nocb --target ${{ matrix.target }}
-          fi
+          cargo build --release --bin nocb --target ${{ matrix.target }}
         shell: bash
 
       - name: Prepare binary
@@ -118,7 +105,7 @@ jobs:
             fi
           done
         env:
-          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          GPG_PASSPHRASE: ${{ secrets.HQ_ROTKO_GPG }}
 
       - name: Create Release
         run: |
