@@ -24,6 +24,15 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: "0"
+      
+      - name: Verify repository structure
+        run: |
+          if [ ! -f "Cargo.toml" ]; then
+            echo "Error: Cargo.toml not found in repository root"
+            echo "Current directory contents:"
+            ls -la
+            exit 1
+          fi
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -53,12 +62,18 @@ jobs:
 
       - name: Build nocb binary
         run: |
+          # Debug: show current directory and contents
+          pwd
+          ls -la
+          
           if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ] && [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
             cross build --release --bin nocb --target ${{ matrix.target }}
           else
             cargo build --release --bin nocb --target ${{ matrix.target }}
           fi
         shell: bash
+        # Uncomment and adjust if Cargo.toml is in a subdirectory:
+        # working-directory: ./nocb
 
       - name: Prepare binary
         run: |
