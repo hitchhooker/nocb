@@ -216,9 +216,12 @@ impl ClipboardManager {
              PRAGMA synchronous = NORMAL;
              PRAGMA cache_size = -64000;
              PRAGMA mmap_size = 268435456;
-             PRAGMA temp_store = MEMORY;
-             
-             CREATE TABLE IF NOT EXISTS entries (
+             PRAGMA temp_store = MEMORY;"
+        )?;
+        
+        // Create table if not exists
+        db.execute_batch(
+            "CREATE TABLE IF NOT EXISTS entries (
                 id INTEGER PRIMARY KEY,
                 hash TEXT NOT NULL UNIQUE,
                 timestamp INTEGER NOT NULL,
@@ -234,6 +237,18 @@ impl ClipboardManager {
             CREATE INDEX IF NOT EXISTS idx_timestamp ON entries(timestamp DESC);
             CREATE INDEX IF NOT EXISTS idx_hash ON entries(hash);"
         )?;
+        
+        // Check if compressed column exists, add if missing (for migration)
+        let has_compressed: bool = db.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('entries') WHERE name='compressed'",
+            [],
+            |row| row.get::<_, i64>(0).map(|count| count > 0)
+        )?;
+        
+        if !has_compressed {
+            db.execute("ALTER TABLE entries ADD COLUMN compressed INTEGER DEFAULT 0", [])?;
+        }
+        
         Ok(())
     }
 
@@ -340,31 +355,55 @@ impl ClipboardManager {
     pub async fn send_copy_command(selection: &str) -> Result<()> {
         use tokio::net::UnixStream;
         use tokio::io::AsyncWriteExt;
+        use tokio::time::timeout;
         
         let sock_path = std::env::temp_dir().join("nocb.sock");
-        let mut stream = UnixStream::connect(&sock_path).await?;
+        
+        // Add timeout for connection
+        let mut stream = timeout(
+            Duration::from_secs(2),
+            UnixStream::connect(&sock_path)
+        ).await
+        .context("Connection timeout")?
+        .context("Failed to connect to daemon")?;
         
         let mut msg = Vec::with_capacity(IPC_MAGIC.len() + 5 + selection.len());
         msg.extend_from_slice(IPC_MAGIC);
         msg.extend_from_slice(format!("COPY:{}", selection).as_bytes());
         
         stream.write_all(&msg).await?;
+        stream.shutdown().await?;
         Ok(())
     }
 
     async fn poll_clipboard(&mut self) -> Result<()> {
-        if let Some(entry) = self.get_clipboard_content(self.atoms.clipboard).await? {
-            if self.last_clipboard_hash.as_ref() != Some(&entry.hash) {
-                self.add_entry(entry.clone()).await?;
-                self.last_clipboard_hash = Some(entry.hash);
+        // Check clipboard
+        match self.get_clipboard_content(self.atoms.clipboard).await {
+            Ok(Some(entry)) => {
+                if self.last_clipboard_hash.as_ref() != Some(&entry.hash) {
+                    self.add_entry(entry.clone()).await?;
+                    self.last_clipboard_hash = Some(entry.hash);
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                // Log but don't propagate - clipboard might be temporarily unavailable
+                eprintln!("Failed to get clipboard content: {}", e);
             }
         }
 
+        // Check primary selection if enabled
         if self.config.use_primary {
-            if let Some(entry) = self.get_clipboard_content(self.atoms.primary).await? {
-                if self.last_primary_hash.as_ref() != Some(&entry.hash) {
-                    self.add_entry(entry.clone()).await?;
-                    self.last_primary_hash = Some(entry.hash);
+            match self.get_clipboard_content(self.atoms.primary).await {
+                Ok(Some(entry)) => {
+                    if self.last_primary_hash.as_ref() != Some(&entry.hash) {
+                        self.add_entry(entry.clone()).await?;
+                        self.last_primary_hash = Some(entry.hash);
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("Failed to get primary selection: {}", e);
                 }
             }
         }
@@ -448,10 +487,15 @@ impl ClipboardManager {
     fn parse_targets(&self, data: &[u8]) -> Vec<String> {
         let mut targets = Vec::new();
         
-        // TARGETS returns array of atoms (u32 values)
+        // TARGETS returns array of atoms (u32 values) in network byte order
         for chunk in data.chunks_exact(4) {
             if let Ok(bytes) = <[u8; 4]>::try_from(chunk) {
-                let atom = u32::from_ne_bytes(bytes);
+                let atom = u32::from_be_bytes(bytes);  // X11 uses big-endian
+                
+                // Skip NONE atom
+                if atom == 0 {
+                    continue;
+                }
                 
                 // Try to get atom name
                 if let Ok(reply) = self.conn.get_atom_name(atom) {
@@ -517,6 +561,8 @@ impl ClipboardManager {
             self.atoms.string
         } else if target == "TEXT" {
             self.atoms.text
+        } else if target == "TARGETS" {
+            self.atoms.targets
         } else {
             self.conn.intern_atom(false, target.as_bytes())?.reply()?.atom
         };
@@ -538,7 +584,7 @@ impl ClipboardManager {
         while tokio::time::Instant::now() < deadline {
             if let Ok(Some(event)) = self.conn.poll_for_event() {
                 if let Event::SelectionNotify(notify) = event {
-                    if notify.requestor == self.window && notify.property == property_atom {
+                    if notify.requestor == self.window && notify.selection == selection {
                         if notify.property == AtomEnum::NONE.into() {
                             return Err(anyhow::anyhow!("Selection conversion failed"));
                         }
