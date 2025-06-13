@@ -20,6 +20,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Debug repository contents
+        run: |
+          echo "=== Current directory ==="
+          pwd
+          echo -e "\n=== Repository root contents ==="
+          ls -la
+          echo -e "\n=== Looking for Cargo.toml ==="
+          find . -name "Cargo.toml" -type f 2>/dev/null || echo "No Cargo.toml found"
+          echo -e "\n=== Git status ==="
+          git status
+          echo -e "\n=== Git log (last 5 commits) ==="
+          git log --oneline -5
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
