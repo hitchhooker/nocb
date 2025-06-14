@@ -22,7 +22,8 @@ enum Commands {
     /// Copy selection to clipboard (reads from stdin if no args)
     Copy {
         /// Selection text or image reference to copy
-        selection: Option<String>
+        #[arg(trailing_var_arg = true)]
+        selection: Vec<String>
     },
     /// Clear clipboard history
     Clear,
@@ -66,20 +67,23 @@ async fn main() -> Result<()> {
             manager.print_history()?;
         }
         Commands::Copy { selection } => {
-            let selection = match selection {
-                Some(s) => s,
-                None => {
-                    use std::io::{self, Read};
-                    let mut buffer = String::new();
-                    io::stdin().read_to_string(&mut buffer)?;
-                    buffer.trim().to_string()
-                }
+            let selection = if selection.is_empty() {
+                // Read from stdin
+                use std::io::{self, Read};
+                let mut buffer = String::new();
+                io::stdin().read_to_string(&mut buffer)?;
+                buffer.trim().to_string()
+            } else {
+                // Join all arguments with spaces
+                selection.join(" ")
             };
-            
+
             if selection.is_empty() {
                 return Ok(());
             }
-            
+
+            // Add debug output
+            eprintln!("DEBUG: Sending copy command for: {:?}", selection);
             ClipboardManager::send_copy_command(&selection).await?;
         }
         Commands::Clear => {
