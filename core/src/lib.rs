@@ -692,7 +692,7 @@ impl ClipboardManager {
     }
 
     // Helper methods for cleaner code
-    fn read_text_preview(&self, file_path: &str, max_len: usize) -> Option<String> {
+    pub fn read_text_preview(&self, file_path: &str, max_len: usize) -> Option<String> {
         let path = self.config.cache_dir.join("blobs").join(file_path);
         
         if file_path.ends_with(".zst") {
@@ -702,7 +702,7 @@ impl ClipboardManager {
         }
     }
 
-    fn read_compressed_preview(&self, path: &Path, max_len: usize) -> Option<String> {
+    pub fn read_compressed_preview(&self, path: &Path, max_len: usize) -> Option<String> {
         use zstd::stream::read::Decoder;
         
         let file = fs::File::open(path).ok()?;
@@ -713,13 +713,13 @@ impl ClipboardManager {
         String::from_utf8(buffer[..n].to_vec()).ok()
     }
 
-    fn read_plain_preview(&self, path: &Path, max_len: usize) -> Option<String> {
+    pub fn read_plain_preview(&self, path: &Path, max_len: usize) -> Option<String> {
         let data = fs::read(path).ok()?;
         let len = data.len().min(max_len * 4);
         String::from_utf8(data[..len].to_vec()).ok()
     }
 
-    fn format_time_ago(&self, timestamp: i64) -> String {
+    pub fn format_time_ago(&self, timestamp: i64) -> String {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         let ago_secs = now.saturating_sub(timestamp as u64);
         
@@ -734,7 +734,7 @@ impl ClipboardManager {
         }
     }
 
-    fn format_size(&self, bytes: i64) -> String {
+    pub fn format_size(&self, bytes: i64) -> String {
         if bytes < 1024 {
             format!("{}B", bytes)
         } else {
