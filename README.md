@@ -27,12 +27,17 @@ nocb daemon &
 
 List history:
 ```bash
-nocb list
+nocb print
 ```
 
 Copy from history (with fzf):
 ```bash
-nocb list | fzf | nocb copy
+nocb print | fzf | nocb copy
+```
+
+Use with rofi
+```bash
+nocb print | rofi -dmenu -i -p "clipboard" | nocb copy
 ```
 
 Clear history:
