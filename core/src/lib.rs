@@ -978,4 +978,49 @@ impl ClipboardManager {
 
         Ok(())
     }
+
+    pub fn get_history(&self, limit: usize) -> Result<Vec<Entry>> {
+        let mut stmt = self.db.prepare(
+            "SELECT id, hash, timestamp, app_name, content_type, inline_text, file_path, mime_type, size_bytes, compressed
+             FROM entries ORDER BY timestamp DESC LIMIT ?1"
+        )?;
+
+        let entries = stmt.query_map([limit as i64], |row| {
+            let id: i64 = row.get(0)?;
+            let hash: String = row.get(1)?;
+            let timestamp: i64 = row.get(2)?;
+            let app_name: String = row.get(3)?;
+            let content_type: String = row.get(4)?;
+            let inline_text: Option<String> = row.get(5)?;
+            let file_path: Option<String> = row.get(6)?;
+            let mime_type: Option<String> = row.get(7)?;
+            let size_bytes: i64 = row.get(8)?;
+            let compressed: Option<bool> = row.get::<_, Option<i64>>(9)?.map(|v| v != 0);
+
+            let content = match content_type.as_str() {
+                "text" => ContentType::Text(inline_text.unwrap_or_default()),
+                "text_file" => ContentType::TextFile {
+                    hash: hash.clone(),
+                    compressed: compressed.unwrap_or(false)
+                },
+                "image" => ContentType::Image {
+                    mime: mime_type.unwrap_or_else(|| "image/unknown".to_string()),
+                    hash: hash.clone(),
+                },
+                _ => ContentType::Text("Unknown".to_string()),
+            };
+
+            Ok(Entry {
+                id: Some(id),
+                hash,
+                timestamp: timestamp as u64,
+                app_name,
+                content,
+                size_bytes: size_bytes as usize,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(entries)
+    }
 }

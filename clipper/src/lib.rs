@@ -1,5 +1,6 @@
 // clipper/src/lib.rs
-use crux_core::{render::Render, App};
+use crux_core::macros::Effect;
+use crux_core::{render::Render, App, Command};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -30,6 +31,9 @@ pub enum Event {
     CopyClip(usize),
     Copied,
     KeyPress(Key),
+    // Shell request events
+    LoadClips,
+    CopyToClipboard(String),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -40,11 +44,9 @@ pub enum Key {
     Escape,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub enum Effect {
-    Render(crux_core::render::RenderOperation),
-    LoadClips,
-    CopyToClipboard(String), // The actual content to copy
+#[derive(Effect)]
+pub struct Capabilities {
+    render: Render<Event>,
 }
 
 #[derive(Default)]
@@ -53,35 +55,51 @@ pub struct ClipperApp;
 impl App for ClipperApp {
     type Event = Event;
     type Model = Model;
-    type ViewModel = Model; // For simplicity, using Model as ViewModel
+    type ViewModel = Model;
     type Capabilities = Capabilities;
+    type Effect = Effect;
 
-    fn update(&self, event: Self::Event, model: &mut Self::Model, caps: &Self::Capabilities) {
+    fn update(&self, event: Self::Event, model: &mut Self::Model, caps: &Self::Capabilities) -> Command<Self::Effect, Self::Event> {
         match event {
             Event::Init | Event::RefreshClips => {
-                caps.clipboard.load_clips();
+                caps.render.render();
+                Command::event(Event::LoadClips)
+            }
+            Event::LoadClips => {
+                // This will be handled by the shell
+                Command::done()
             }
             Event::ClipsLoaded(clips) => {
                 model.clips = clips;
                 caps.render.render();
+                Command::done()
             }
             Event::UpdateSearch(query) => {
                 model.search_query = query;
                 model.selected_index = 0;
                 caps.render.render();
+                Command::done()
             }
             Event::SelectIndex(index) => {
                 model.selected_index = index;
                 caps.render.render();
+                Command::done()
             }
             Event::CopyClip(index) => {
                 if let Some(clip) = self.filtered_clips(model).get(index) {
-                    caps.clipboard.copy_content(clip.content.clone());
+                    let content = clip.content.clone();
+                    Command::event(Event::CopyToClipboard(content))
+                } else {
+                    Command::done()
                 }
             }
+            Event::CopyToClipboard(_) => {
+                // This will be handled by the shell
+                Command::done()
+            }
             Event::Copied => {
-                // Could show a notification or close the window
                 caps.render.render();
+                Command::done()
             }
             Event::KeyPress(key) => {
                 match key {
@@ -90,6 +108,7 @@ impl App for ClipperApp {
                             model.selected_index -= 1;
                             caps.render.render();
                         }
+                        Command::done()
                     }
                     Key::Down => {
                         let max = self.filtered_clips(model).len().saturating_sub(1);
@@ -97,12 +116,14 @@ impl App for ClipperApp {
                             model.selected_index += 1;
                             caps.render.render();
                         }
+                        Command::done()
                     }
                     Key::Enter => {
-                        self.update(Event::CopyClip(model.selected_index), model, caps);
+                        self.update(Event::CopyClip(model.selected_index), model, caps)
                     }
                     Key::Escape => {
                         // Handle in shell (close window)
+                        Command::done()
                     }
                 }
             }
@@ -110,8 +131,6 @@ impl App for ClipperApp {
     }
 
     fn view(&self, model: &Self::Model) -> Self::ViewModel {
-        // For now, just return the model
-        // In a more complex app, you'd transform it here
         model.clone()
     }
 }
@@ -128,59 +147,5 @@ impl ClipperApp {
                 .cloned()
                 .collect()
         }
-    }
-}
-
-#[derive(crux_core::macros::Capabilities)]
-#[capabilities(render = "Render", clipboard = "Clipboard")]
-pub struct Capabilities {
-    render: Render<Effect>,
-    clipboard: Clipboard<Event>,
-}
-
-// Custom capability for clipboard operations
-#[derive(Clone)]
-pub struct Clipboard<Ev> {
-    context: crux_core::capability::CapabilityContext<Effect, Ev>,
-}
-
-impl<Ev> Clipboard<Ev> 
-where
-    Ev: 'static,
-{
-    pub fn new(context: crux_core::capability::CapabilityContext<Effect, Ev>) -> Self {
-        Self { context }
-    }
-
-    pub fn load_clips(&self) {
-        self.context.spawn({
-            let context = self.context.clone();
-            async move {
-                context.notify(Effect::LoadClips);
-            }
-        });
-    }
-
-    pub fn copy_content(&self, content: String) {
-        self.context.spawn({
-            let context = self.context.clone();
-            async move {
-                context.notify(Effect::CopyToClipboard(content));
-            }
-        });
-    }
-}
-
-impl<Ev> crux_core::capability::Capability<Ev> for Clipboard<Ev> {
-    type Operation = ();
-    type MappedSelf<MappedEv> = Clipboard<MappedEv>;
-
-    fn map_event<F, NewEv>(&self, f: F) -> Self::MappedSelf<NewEv>
-    where
-        F: Fn(NewEv) -> Ev + Send + Sync + 'static,
-        Ev: 'static,
-        NewEv: 'static,
-    {
-        Clipboard::new(self.context.map_event(f))
     }
 }
