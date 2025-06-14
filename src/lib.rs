@@ -206,13 +206,19 @@ impl ClipboardManager {
         let (tx, rx) = mpsc::channel(10);
         self.command_rx = Some(rx);
 
+        // Platform-specific socket/pipe paths
+        #[cfg(unix)]
         let sock_path = std::env::temp_dir().join("nocb.sock");
+        
+        #[cfg(windows)]
+        let sock_path = PathBuf::from(r"\\.\pipe\nocb");
 
         let tx_clone = tx.clone();
         let sock_path_clone = sock_path.clone();
 
         let ipc_handle = tokio::spawn(async move {
             let result = Self::ipc_server(tx_clone, sock_path_clone.clone()).await;
+            #[cfg(unix)]
             let _ = std::fs::remove_file(&sock_path_clone);
             result
         });
@@ -248,92 +254,162 @@ impl ClipboardManager {
             }
         }
 
+        #[cfg(unix)]
         let _ = std::fs::remove_file(&sock_path);
+        
         ipc_handle.abort();
 
         Ok(())
     }
 
     async fn ipc_server(tx: mpsc::Sender<Command>, sock_path: PathBuf) -> Result<()> {
-        use tokio::net::UnixListener;
-
         let _ = std::fs::remove_file(&sock_path);
-        let listener = UnixListener::bind(&sock_path)?;
-        
-        // Set socket permissions to user-only (0700)
+
+        // Platform-specific IPC implementation
         #[cfg(unix)]
         {
+            use tokio::net::UnixListener;
+            
+            let listener = UnixListener::bind(&sock_path)?;
+            
+            // Set socket permissions to user-only (0700)
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(0o700);
             std::fs::set_permissions(&sock_path, perms)?;
-        }
 
-        loop {
-            let (mut stream, _addr) = listener.accept().await?;
+            loop {
+                let (mut stream, _addr) = listener.accept().await?;
 
-            #[cfg(target_os = "linux")]
-            {
-                match stream.peer_cred() {
-                    Ok(cred) => {
-                        let current_uid = unsafe { libc::getuid() };
-                        if cred.uid() != current_uid {
-                            eprintln!("IPC rejected: different UID ({} != {})", cred.uid(), current_uid);
+                // Linux-specific peer credential check
+                #[cfg(target_os = "linux")]
+                {
+                    match stream.peer_cred() {
+                        Ok(cred) => {
+                            let current_uid = unsafe { libc::getuid() };
+                            if cred.uid() != current_uid {
+                                eprintln!("IPC rejected: different UID ({} != {})", cred.uid(), current_uid);
+                                continue;
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to get peer credentials: {}", e);
                             continue;
                         }
                     }
-                    Err(e) => {
-                        eprintln!("Failed to get peer credentials: {}", e);
-                        continue;
-                    }
                 }
-            }
 
-            let tx = tx.clone();
+                let tx = tx.clone();
 
-            tokio::spawn(async move {
-                use tokio::io::AsyncReadExt;
-                let mut buf = vec![0u8; MAX_IPC_MESSAGE_SIZE];
+                tokio::spawn(async move {
+                    use tokio::io::AsyncReadExt;
+                    let mut buf = vec![0u8; MAX_IPC_MESSAGE_SIZE];
 
-                match stream.read(&mut buf).await {
-                    Ok(n) if n > IPC_MAGIC.len() => {
-                        if &buf[..IPC_MAGIC.len()] != IPC_MAGIC {
-                            return;
-                        }
+                    match stream.read(&mut buf).await {
+                        Ok(n) if n > IPC_MAGIC.len() => {
+                            if &buf[..IPC_MAGIC.len()] != IPC_MAGIC {
+                                return;
+                            }
 
-                        if let Ok(cmd) = String::from_utf8(buf[IPC_MAGIC.len()..n].to_vec()) {
-                            let cmd = cmd.trim();
-                            if cmd.starts_with("COPY:") {
-                                let selection = cmd[5..].to_string();
-                                let _ = tx.send(Command::Copy(selection)).await;
+                            if let Ok(cmd) = String::from_utf8(buf[IPC_MAGIC.len()..n].to_vec()) {
+                                let cmd = cmd.trim();
+                                if cmd.starts_with("COPY:") {
+                                    let selection = cmd[5..].to_string();
+                                    let _ = tx.send(Command::Copy(selection)).await;
+                                }
                             }
                         }
+                        _ => {}
                     }
-                    _ => {}
-                }
-            });
+                });
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            // Windows: Use named pipes
+            use tokio::net::windows::named_pipe::{ServerOptions, PipeMode};
+            
+            let pipe_name = r"\\.\pipe\nocb";
+            
+            loop {
+                let server = ServerOptions::new()
+                    .first_pipe_instance(true)
+                    .pipe_mode(PipeMode::Message)
+                    .create(pipe_name)?;
+
+                let connected = server.connect().await?;
+                let tx = tx.clone();
+
+                tokio::spawn(async move {
+                    use tokio::io::AsyncReadExt;
+                    let mut buf = vec![0u8; MAX_IPC_MESSAGE_SIZE];
+
+                    match connected.read(&mut buf).await {
+                        Ok(n) if n > IPC_MAGIC.len() => {
+                            if &buf[..IPC_MAGIC.len()] != IPC_MAGIC {
+                                return;
+                            }
+
+                            if let Ok(cmd) = String::from_utf8(buf[IPC_MAGIC.len()..n].to_vec()) {
+                                let cmd = cmd.trim();
+                                if cmd.starts_with("COPY:") {
+                                    let selection = cmd[5..].to_string();
+                                    let _ = tx.send(Command::Copy(selection)).await;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                });
+            }
         }
     }
 
     pub async fn send_copy_command(selection: &str) -> Result<()> {
-        use tokio::net::UnixStream;
         use tokio::io::AsyncWriteExt;
         use tokio::time::timeout;
         
-        let sock_path = std::env::temp_dir().join("nocb.sock");
+        #[cfg(unix)]
+        {
+            use tokio::net::UnixStream;
+            
+            let sock_path = std::env::temp_dir().join("nocb.sock");
+            
+            let mut stream = timeout(
+                Duration::from_secs(2),
+                UnixStream::connect(&sock_path)
+            ).await
+            .context("Connection timeout")?
+            .context("Failed to connect to daemon")?;
+            
+            let mut msg = Vec::with_capacity(IPC_MAGIC.len() + 5 + selection.len());
+            msg.extend_from_slice(IPC_MAGIC);
+            msg.extend_from_slice(format!("COPY:{}", selection).as_bytes());
+            
+            stream.write_all(&msg).await?;
+            stream.shutdown().await?;
+        }
         
-        let mut stream = timeout(
-            Duration::from_secs(2),
-            UnixStream::connect(&sock_path)
-        ).await
-        .context("Connection timeout")?
-        .context("Failed to connect to daemon")?;
+        #[cfg(windows)]
+        {
+            use tokio::net::windows::named_pipe::ClientOptions;
+            
+            let pipe_name = r"\\.\pipe\nocb";
+            
+            let mut client = timeout(
+                Duration::from_secs(2),
+                ClientOptions::new().open(pipe_name)
+            ).await
+            .context("Connection timeout")?
+            .context("Failed to connect to daemon")?;
+            
+            let mut msg = Vec::with_capacity(IPC_MAGIC.len() + 5 + selection.len());
+            msg.extend_from_slice(IPC_MAGIC);
+            msg.extend_from_slice(format!("COPY:{}", selection).as_bytes());
+            
+            client.write_all(&msg).await?;
+        }
         
-        let mut msg = Vec::with_capacity(IPC_MAGIC.len() + 5 + selection.len());
-        msg.extend_from_slice(IPC_MAGIC);
-        msg.extend_from_slice(format!("COPY:{}", selection).as_bytes());
-        
-        stream.write_all(&msg).await?;
-        stream.shutdown().await?;
         Ok(())
     }
 
@@ -489,7 +565,7 @@ impl ClipboardManager {
             &img_buffer,
             width,
             height,
-            image::ColorType::Rgba8
+            image::ExtendedColorType::Rgba8
         )?;
         
         Ok(png_data)

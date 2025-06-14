@@ -39,9 +39,20 @@ enum Commands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    if std::env::var("DISPLAY").is_err() {
-        eprintln!("Error: X display not available");
-        std::process::exit(1);
+    // Platform-specific display check
+    #[cfg(target_os = "linux")]
+    {
+        // Check for either X11 or Wayland
+        if std::env::var("DISPLAY").is_err() && std::env::var("WAYLAND_DISPLAY").is_err() {
+            eprintln!("Error: No display server available (neither X11 nor Wayland)");
+            std::process::exit(1);
+        }
+    }
+
+    // On macOS and Windows, arboard handles the clipboard natively
+    #[cfg(not(target_os = "linux"))]
+    {
+        // No display check needed for macOS/Windows
     }
 
     let config = Config::load().context("Failed to load configuration")?;
