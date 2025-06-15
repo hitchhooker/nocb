@@ -20,7 +20,7 @@ const HASH_PREFIX_LEN: usize = 8;
 const MAX_CLIPBOARD_SIZE: usize = 100 * 1024 * 1024; // 100MB
 const MAX_IPC_MESSAGE_SIZE: usize = 4096;
 const IPC_MAGIC: &[u8] = b"NOCB\x00\x01";
-const LRU_CACHE_SIZE: usize = 16;
+const LRU_CACHE_SIZE: usize = 64; // Increased for better hit rate
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -121,13 +121,18 @@ enum ClipboardContent<'a> {
     Image(ImageData<'a>),
 }
 
-// Cached entry data
+// Complete cached entry with all display data
 #[derive(Clone)]
 struct CachedEntry {
     content_type: String,
     inline_text: Option<String>,
     file_path: Option<String>,
     compressed: bool,
+    size_bytes: usize,
+    timestamp: i64,
+    mime_type: Option<String>,
+    width: Option<u32>,
+    height: Option<u32>,
 }
 
 pub struct ClipboardManager {
@@ -611,23 +616,26 @@ impl ClipboardManager {
             return Ok(());
         }
 
-        // Add to DB
-        match &entry.content {
+        let timestamp = entry.timestamp as i64;
+        let cached_entry = match &entry.content {
             ContentType::Text(text) => {
                 self.db.execute(
                     "INSERT OR REPLACE INTO entries (hash, timestamp, app_name, content_type, inline_text, size_bytes)
                      VALUES (?1, ?2, ?3, 'text', ?4, ?5)",
-                    params![entry.hash, entry.timestamp as i64, entry.app_name, text, entry.size_bytes as i64],
+                    params![entry.hash, timestamp, entry.app_name, text, entry.size_bytes as i64],
                 )?;
 
-                // Add to cache
-                let mut cache = self.lru_cache.write();
-                cache.put(entry.hash.clone(), CachedEntry {
+                CachedEntry {
                     content_type: "text".to_string(),
                     inline_text: Some(text.clone()),
                     file_path: None,
                     compressed: false,
-                });
+                    size_bytes: entry.size_bytes,
+                    timestamp,
+                    mime_type: None,
+                    width: None,
+                    height: None,
+                }
             }
             ContentType::TextFile { hash, compressed } => {
                 let file_path = if *compressed {
@@ -638,35 +646,45 @@ impl ClipboardManager {
                 self.db.execute(
                     "INSERT OR REPLACE INTO entries (hash, timestamp, app_name, content_type, file_path, size_bytes, compressed)
                      VALUES (?1, ?2, ?3, 'text_file', ?4, ?5, ?6)",
-                    params![entry.hash, entry.timestamp as i64, entry.app_name, file_path, entry.size_bytes as i64, *compressed as i64],
+                    params![entry.hash, timestamp, entry.app_name, file_path, entry.size_bytes as i64, *compressed as i64],
                 )?;
 
-                // Add to cache
-                let mut cache = self.lru_cache.write();
-                cache.put(entry.hash.clone(), CachedEntry {
+                CachedEntry {
                     content_type: "text_file".to_string(),
                     inline_text: None,
                     file_path: Some(file_path),
                     compressed: *compressed,
-                });
+                    size_bytes: entry.size_bytes,
+                    timestamp,
+                    mime_type: None,
+                    width: None,
+                    height: None,
+                }
             }
             ContentType::Image { mime, hash, width, height } => {
                 self.db.execute(
                     "INSERT OR REPLACE INTO entries (hash, timestamp, app_name, content_type, file_path, mime_type, size_bytes, width, height)
                      VALUES (?1, ?2, ?3, 'image', ?4, ?5, ?6, ?7, ?8)",
-                    params![entry.hash, entry.timestamp as i64, entry.app_name, hash, mime, entry.size_bytes as i64, *width as i64, *height as i64],
+                    params![entry.hash, timestamp, entry.app_name, hash, mime, entry.size_bytes as i64, *width as i64, *height as i64],
                 )?;
 
-                // Add to cache
-                let mut cache = self.lru_cache.write();
-                cache.put(entry.hash.clone(), CachedEntry {
+                CachedEntry {
                     content_type: "image".to_string(),
                     inline_text: None,
                     file_path: Some(hash.clone()),
                     compressed: false,
-                });
+                    size_bytes: entry.size_bytes,
+                    timestamp,
+                    mime_type: Some(mime.clone()),
+                    width: Some(*width),
+                    height: Some(*height),
+                }
             }
-        }
+        };
+
+        // Add to cache
+        let mut cache = self.lru_cache.write();
+        cache.put(entry.hash.clone(), cached_entry);
 
         Ok(())
     }
@@ -778,77 +796,170 @@ impl ClipboardManager {
             println!("{}", entry.replace('\n', " "));
         }
 
-        let mut stmt = self.db.prepare(
-            "SELECT hash, app_name, content_type, inline_text, file_path, mime_type, size_bytes, timestamp, width, height
-             FROM entries ORDER BY timestamp DESC LIMIT ?1"
-        )?;
+        // Optimized: build hash set of cached entries first
+        let cached_hashes: Vec<String> = {
+            let cache = self.lru_cache.read();
+            cache.iter().map(|(hash, _)| hash.clone()).collect()
+        };
 
-        let rows = stmt.query_map([self.config.max_print_entries as i64], |row| {
-            let hash: String = row.get(0)?;
-            let app_name: String = row.get(1)?;
-            let content_type: String = row.get(2)?;
-            let inline_text: Option<String> = row.get(3)?;
-            let file_path: Option<String> = row.get(4)?;
-            let mime_type: Option<String> = row.get(5)?;
-            let size_bytes: i64 = row.get(6)?;
-            let timestamp: i64 = row.get(7)?;
-            let width: Option<i64> = row.get(8)?;
-            let height: Option<i64> = row.get(9)?;
+        // Process cached entries first
+        let mut printed_hashes = std::collections::HashSet::new();
+        let mut printed_count = 0;
 
-            Ok((hash, app_name, content_type, inline_text, file_path, mime_type, size_bytes, timestamp, width, height))
-        })?;
+        // Sort cached entries by timestamp
+        let mut cached_entries: Vec<(String, CachedEntry)> = {
+            let cache = self.lru_cache.read();
+            cached_hashes.iter()
+                .filter_map(|hash| {
+                    cache.peek(hash).map(|entry| (hash.clone(), entry.clone()))
+                })
+                .collect()
+        };
+        cached_entries.sort_by(|a, b| b.1.timestamp.cmp(&a.1.timestamp));
 
-        for row in rows {
-            let (hash, _app_name, content_type, inline_text, file_path, mime_type, size_bytes, timestamp, width, height) = row?;
-            let time_str = self.format_time_ago(timestamp);
-            let hash_prefix = &hash[..HASH_PREFIX_LEN.min(hash.len())];
-            
-            let size_str = self.format_size(size_bytes);
+        // Print cached entries
+        for (hash, cached) in cached_entries.iter().take(self.config.max_print_entries) {
+            if printed_count >= self.config.max_print_entries {
+                break;
+            }
 
-            match content_type.as_str() {
-                "text" => {
-                    if let Some(text) = inline_text {
-                        let available_chars = 80 - time_str.len() - 1 - 9 - 1;
-                        let display = self.truncate_to_fit(&text, available_chars);
-                        println!("{} {} #{}", time_str, display, hash_prefix);
-                    }
-                }
-                "text_file" => {
-                    if let Some(fp) = file_path {
-                        let available_chars = 80 - time_str.len() - 1 - 9 - 1 - size_str.len() - 3;
-                        let preview = self.read_text_preview(&fp, available_chars * 4)
-                            .map(|p| self.truncate_to_fit(&p, available_chars))
-                            .filter(|p| !p.is_empty());
+            self.print_cached_entry(hash, cached)?;
+            printed_hashes.insert(hash.clone());
+            printed_count += 1;
+        }
 
-                        if let Some(display) = preview {
-                            println!("{} {} [{}] #{}", time_str, display, size_str, hash_prefix);
-                        } else {
-                            println!("{} [Text: {}] #{}", time_str, size_str, hash_prefix);
+        // Only query database for remaining entries if needed
+        if printed_count < self.config.max_print_entries {
+            let mut stmt = self.db.prepare(
+                "SELECT hash, app_name, content_type, inline_text, file_path, mime_type, size_bytes, timestamp, width, height
+                 FROM entries 
+                 WHERE hash NOT IN (SELECT value FROM json_each(?1))
+                 ORDER BY timestamp DESC LIMIT ?2"
+            )?;
+
+            let excluded_json = serde_json::to_string(&printed_hashes.iter().collect::<Vec<_>>())?;
+            let remaining_limit = self.config.max_print_entries - printed_count;
+
+            let rows = stmt.query_map(params![excluded_json, remaining_limit as i64], |row| {
+                let hash: String = row.get(0)?;
+                let app_name: String = row.get(1)?;
+                let content_type: String = row.get(2)?;
+                let inline_text: Option<String> = row.get(3)?;
+                let file_path: Option<String> = row.get(4)?;
+                let mime_type: Option<String> = row.get(5)?;
+                let size_bytes: i64 = row.get(6)?;
+                let timestamp: i64 = row.get(7)?;
+                let width: Option<i64> = row.get(8)?;
+                let height: Option<i64> = row.get(9)?;
+
+                Ok((hash, app_name, content_type, inline_text, file_path, mime_type, size_bytes, timestamp, width, height))
+            })?;
+
+            for row in rows {
+                let (hash, _app_name, content_type, inline_text, file_path, mime_type, size_bytes, timestamp, width, height) = row?;
+                let time_str = self.format_time_ago(timestamp);
+                let hash_prefix = &hash[..HASH_PREFIX_LEN.min(hash.len())];
+                
+                let size_str = self.format_size(size_bytes);
+
+                match content_type.as_str() {
+                    "text" => {
+                        if let Some(text) = inline_text {
+                            let available_chars = 80 - time_str.len() - 1 - 9 - 1;
+                            let display = self.truncate_to_fit(&text, available_chars);
+                            println!("{} {} #{}", time_str, display, hash_prefix);
                         }
                     }
-                }
-                "image" => {
-                    let mime_short = mime_type.as_ref()
-                        .map(|m| m.split('/').last().unwrap_or("?"))
-                        .unwrap_or("?");
-                    
-                    if let (Some(w), Some(h)) = (width, height) {
-                        let dims_str = format!("{}x{}px", w, h);
-                        let available = 80 - time_str.len() - 1 - 9 - 7 - mime_short.len() - size_str.len() - 2;
-                        if dims_str.len() <= available {
-                            println!("{} [IMG:{} {} {}] #{}", 
-                                time_str, dims_str, mime_short, size_str, hash_prefix);
+                    "text_file" => {
+                        if let Some(fp) = file_path {
+                            let available_chars = 80 - time_str.len() - 1 - 9 - 1 - size_str.len() - 3;
+                            let preview = self.read_text_preview(&fp, available_chars * 4)
+                                .map(|p| self.truncate_to_fit(&p, available_chars))
+                                .filter(|p| !p.is_empty());
+
+                            if let Some(display) = preview {
+                                println!("{} {} [{}] #{}", time_str, display, size_str, hash_prefix);
+                            } else {
+                                println!("{} [Text: {}] #{}", time_str, size_str, hash_prefix);
+                            }
+                        }
+                    }
+                    "image" => {
+                        let mime_short = mime_type.as_ref()
+                            .map(|m| m.split('/').last().unwrap_or("?"))
+                            .unwrap_or("?");
+                        
+                        if let (Some(w), Some(h)) = (width, height) {
+                            let dims_str = format!("{}x{}px", w, h);
+                            let available = 80 - time_str.len() - 1 - 9 - 7 - mime_short.len() - size_str.len() - 2;
+                            if dims_str.len() <= available {
+                                println!("{} [IMG:{} {} {}] #{}", 
+                                    time_str, dims_str, mime_short, size_str, hash_prefix);
+                            } else {
+                                println!("{} [IMG:{} {}] #{}", 
+                                    time_str, mime_short, size_str, hash_prefix);
+                            }
                         } else {
                             println!("{} [IMG:{} {}] #{}", 
                                 time_str, mime_short, size_str, hash_prefix);
                         }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn print_cached_entry(&self, hash: &str, cached: &CachedEntry) -> Result<()> {
+        let time_str = self.format_time_ago(cached.timestamp);
+        let hash_prefix = &hash[..HASH_PREFIX_LEN.min(hash.len())];
+        let size_str = self.format_size(cached.size_bytes as i64);
+
+        match cached.content_type.as_str() {
+            "text" => {
+                if let Some(text) = &cached.inline_text {
+                    let available_chars = 80 - time_str.len() - 1 - 9 - 1;
+                    let display = self.truncate_to_fit(text, available_chars);
+                    println!("{} {} #{}", time_str, display, hash_prefix);
+                }
+            }
+            "text_file" => {
+                if let Some(fp) = &cached.file_path {
+                    let available_chars = 80 - time_str.len() - 1 - 9 - 1 - size_str.len() - 3;
+                    let preview = self.read_text_preview(fp, available_chars * 4)
+                        .map(|p| self.truncate_to_fit(&p, available_chars))
+                        .filter(|p| !p.is_empty());
+
+                    if let Some(display) = preview {
+                        println!("{} {} [{}] #{}", time_str, display, size_str, hash_prefix);
+                    } else {
+                        println!("{} [Text: {}] #{}", time_str, size_str, hash_prefix);
+                    }
+                }
+            }
+            "image" => {
+                let mime_short = cached.mime_type.as_ref()
+                    .map(|m| m.split('/').last().unwrap_or("?"))
+                    .unwrap_or("?");
+                
+                if let (Some(w), Some(h)) = (cached.width, cached.height) {
+                    let dims_str = format!("{}x{}px", w, h);
+                    let available = 80 - time_str.len() - 1 - 9 - 7 - mime_short.len() - size_str.len() - 2;
+                    if dims_str.len() <= available {
+                        println!("{} [IMG:{} {} {}] #{}", 
+                            time_str, dims_str, mime_short, size_str, hash_prefix);
                     } else {
                         println!("{} [IMG:{} {}] #{}", 
                             time_str, mime_short, size_str, hash_prefix);
                     }
+                } else {
+                    println!("{} [IMG:{} {}] #{}", 
+                        time_str, mime_short, size_str, hash_prefix);
                 }
-                _ => {}
             }
+            _ => {}
         }
 
         Ok(())

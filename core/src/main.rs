@@ -7,7 +7,7 @@ use tokio::signal;
 #[derive(Parser)]
 #[command(name = "nocb")]
 #[command(version = "1.1.1")]
-#[command(about = "Nearly Optimal ClipBoard manager")]
+#[command(about = "nearly optimal clipboard manager")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
