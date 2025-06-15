@@ -345,23 +345,23 @@ impl ClipboardManager {
         #[cfg(windows)]
         {
             use tokio::net::windows::named_pipe::{ServerOptions, PipeMode};
+            use tokio::io::AsyncReadExt;
 
             let pipe_name = r"\\.\pipe\nocb";
 
             loop {
-                let server = ServerOptions::new()
+                let mut server = ServerOptions::new()
                     .first_pipe_instance(true)
                     .pipe_mode(PipeMode::Message)
                     .create(pipe_name)?;
 
-                let connected = server.connect().await?;
+                server.connect().await?;
                 let tx = tx.clone();
 
                 tokio::spawn(async move {
-                    use tokio::io::AsyncReadExt;
                     let mut buf = vec![0u8; MAX_IPC_MESSAGE_SIZE];
 
-                    match connected.read(&mut buf).await {
+                    match server.read(&mut buf).await {
                         Ok(n) if n > IPC_MAGIC.len() => {
                             if &buf[..IPC_MAGIC.len()] != IPC_MAGIC {
                                 return;
@@ -410,21 +410,22 @@ impl ClipboardManager {
         #[cfg(windows)]
         {
             use tokio::net::windows::named_pipe::ClientOptions;
+            use tokio::io::AsyncWriteExt;
 
             let pipe_name = r"\\.\pipe\nocb";
 
-            let mut client = timeout(
-                Duration::from_secs(2),
-                ClientOptions::new().open(pipe_name)
-            ).await
-            .context("Connection timeout")?
-            .context("Failed to connect to daemon")?;
+            let mut client = ClientOptions::new().open(pipe_name)?;
 
             let mut msg = Vec::with_capacity(IPC_MAGIC.len() + 5 + selection.len());
             msg.extend_from_slice(IPC_MAGIC);
             msg.extend_from_slice(format!("COPY:{}", selection).as_bytes());
 
-            client.write_all(&msg).await?;
+            timeout(
+                Duration::from_secs(2),
+                client.write_all(&msg)
+            ).await
+            .context("Write timeout")?
+            .context("Failed to write to pipe")?;
         }
 
         Ok(())
