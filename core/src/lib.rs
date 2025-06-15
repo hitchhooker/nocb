@@ -128,7 +128,6 @@ struct CachedEntry {
     inline_text: Option<String>,
     file_path: Option<String>,
     compressed: bool,
-    size_bytes: usize,
 }
 
 pub struct ClipboardManager {
@@ -628,7 +627,6 @@ impl ClipboardManager {
                     inline_text: Some(text.clone()),
                     file_path: None,
                     compressed: false,
-                    size_bytes: entry.size_bytes,
                 });
             }
             ContentType::TextFile { hash, compressed } => {
@@ -650,7 +648,6 @@ impl ClipboardManager {
                     inline_text: None,
                     file_path: Some(file_path),
                     compressed: *compressed,
-                    size_bytes: entry.size_bytes,
                 });
             }
             ContentType::Image { mime, hash, width, height } => {
@@ -667,7 +664,6 @@ impl ClipboardManager {
                     inline_text: None,
                     file_path: Some(hash.clone()),
                     compressed: false,
-                    size_bytes: entry.size_bytes,
                 });
             }
         }
@@ -773,18 +769,6 @@ impl ClipboardManager {
             format!("{}K", bytes / 1024)
         } else {
             format!("{}M", bytes / (1024 * 1024))
-        }
-    }
-
-    fn truncate_display(&self, text: &str) -> String {
-        if text.len() > self.config.max_display_length {
-            let mut end = self.config.max_display_length;
-            while !text.is_char_boundary(end) && end > 0 {
-                end -= 1;
-            }
-            format!("{}…", &text[..end])
-        } else {
-            text.to_string()
         }
     }
 

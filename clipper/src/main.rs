@@ -1,8 +1,6 @@
-// clipper/src/main.rs
 use clipper::{ClipperApp, ClipEntry, Event, Key, Model};
 use crux_core::Core;
 use eframe::egui;
-use nocb::{ClipboardManager, Config};
 use parking_lot::Mutex;
 use std::sync::Arc;
 
@@ -10,14 +8,11 @@ use std::sync::Arc;
 fn chaos_theme() -> egui::Visuals {
     let mut visuals = egui::Visuals::dark();
 
-    // Colors from rofi theme
     let pink = egui::Color32::from_rgb(0xE6, 0x00, 0x7A);
-    let _green = egui::Color32::from_rgb(0x56, 0xF3, 0x9A);
-    let _cyan = egui::Color32::from_rgb(0x00, 0xFF, 0xE1);
     let bg = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 0xCC);
     let bg_alt = egui::Color32::from_rgb(0x1A, 0x1B, 0x26);
 
-    // Widget visuals
+    // widget visuals
     visuals.widgets.noninteractive.bg_fill = bg_alt;
     visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(2.0, pink);
     visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, pink);
@@ -34,16 +29,13 @@ fn chaos_theme() -> egui::Visuals {
     visuals.widgets.active.bg_stroke = egui::Stroke::new(2.0, pink);
     visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, egui::Color32::BLACK);
 
-    // Selection colors
     visuals.selection.bg_fill = pink;
     visuals.selection.stroke = egui::Stroke::new(1.0, egui::Color32::BLACK);
 
-    // Window
     visuals.window_fill = bg;
     visuals.window_stroke = egui::Stroke::new(3.0, pink);
     visuals.window_rounding = egui::Rounding::same(8.0);
 
-    // Misc
     visuals.extreme_bg_color = bg;
     visuals.panel_fill = bg;
     visuals.faint_bg_color = bg_alt;
@@ -51,125 +43,197 @@ fn chaos_theme() -> egui::Visuals {
     visuals
 }
 
+// daemon communication
+mod daemon {
+    use std::process::{Command, Stdio};
+    use super::ClipEntry;
+
+    pub fn ensure_daemon_running() -> Result<(), Box<dyn std::error::Error>> {
+        // check if daemon is running by trying to connect
+        match send_command("") {
+            Ok(_) => Ok(()),
+            Err(_) => {
+                // start daemon
+                #[cfg(target_os = "windows")]
+                {
+                    Command::new("nocb")
+                        .arg("daemon")
+                        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+                        .spawn()?;
+                }
+                
+                #[cfg(not(target_os = "windows"))]
+                {
+                    Command::new("nocb")
+                        .arg("daemon")
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn()?;
+                }
+                
+                // wait for daemon to start
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                Ok(())
+            }
+        }
+    }
+
+    pub fn get_clips() -> Result<Vec<ClipEntry>, Box<dyn std::error::Error>> {
+        let output = Command::new("nocb")
+            .arg("print")
+            .output()?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut clips = Vec::new();
+
+        for (id, line) in stdout.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            // parse line format: "3m content... #hash"
+            let parts: Vec<&str> = line.splitn(2, ' ').collect();
+            if parts.len() < 2 {
+                continue;
+            }
+
+            let time_ago = parts[0].to_string();
+            let rest = parts[1];
+
+            // extract hash
+            let hash_pos = rest.rfind('#').unwrap_or(rest.len());
+            let content = rest[..hash_pos].trim();
+            let hash = if hash_pos < rest.len() {
+                rest[hash_pos + 1..].trim().to_string()
+            } else {
+                format!("unknown{}", id)
+            };
+
+            // detect type and size
+            let (entry_type, size_str, display_content) = if content.starts_with("[IMG:") {
+                ("image".to_string(), parse_size_from_image(content), content.to_string())
+            } else if content.contains(" [") && content.ends_with(']') {
+                // large text with size
+                let bracket_pos = content.rfind(" [").unwrap_or(content.len());
+                let text_part = &content[..bracket_pos];
+                let size_part = &content[bracket_pos + 2..content.len() - 1];
+                ("text".to_string(), Some(size_part.to_string()), text_part.to_string())
+            } else {
+                ("text".to_string(), None, content.to_string())
+            };
+
+            clips.push(ClipEntry {
+                id: id as i64,
+                hash: hash.clone(),
+                content: display_content,
+                time_ago,
+                entry_type,
+                size_str,
+            });
+        }
+
+        Ok(clips)
+    }
+
+    fn parse_size_from_image(content: &str) -> Option<String> {
+        // parse "[IMG:1920x1080px png 256K]" format
+        if let Some(start) = content.find(' ') {
+            if let Some(end) = content.rfind(' ') {
+                if end > start {
+                    return Some(content[end + 1..content.len() - 1].to_string());
+                }
+            }
+        }
+        None
+    }
+
+    pub fn send_command(selection: &str) -> Result<(), Box<dyn std::error::Error>> {
+        Command::new("nocb")
+            .arg("copy")
+            .arg(selection)
+            .output()?;
+        Ok(())
+    }
+}
+
 struct ClipperGui {
     core: Core<ClipperApp>,
     model: Model,
-    clipboard_manager: Arc<Mutex<ClipboardManager>>,
+    show_window: Arc<Mutex<bool>>,
 }
 
 impl ClipperGui {
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // Apply chaOS theme
+    fn new(cc: &eframe::CreationContext<'_>, show_window: Arc<Mutex<bool>>) -> Self {
         cc.egui_ctx.set_visuals(chaos_theme());
 
-        // Initialize clipboard manager
-        let config = Config::load().expect("Failed to load config");
-        let manager = tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(ClipboardManager::new(config))
-            .expect("Failed to create clipboard manager");
-
-        let clipboard_manager = Arc::new(Mutex::new(manager));
-
-        // Start monitoring in background
-        let manager_clone = clipboard_manager.clone();
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async {
-                let mut manager = manager_clone.lock();
-                manager.run_daemon().await.expect("Daemon failed");
-            });
-        });
+        // ensure daemon is running
+        if let Err(e) = daemon::ensure_daemon_running() {
+            eprintln!("Failed to start daemon: {}", e);
+        }
 
         let mut app = Self {
             core: Core::new(),
             model: Model::default(),
-            clipboard_manager,
+            show_window,
         };
 
-        // Initial load
         app.process_event(Event::Init);
         app
     }
 
     fn process_event(&mut self, event: Event) {
-        // Handle shell operations based on the event
         match &event {
-            Event::Init | Event::RefreshClips => {
+            Event::Init | Event::RefreshClips | Event::LoadClips => {
                 self.load_clips();
             }
             Event::CopyClip(index) => {
-                // Get the clip content from the current model
-                if let Some(clip) = self.model.clips.get(*index) {
-                    self.copy_to_clipboard(clip.content.clone());
+                if let Some(clip) = self.filtered_clips().get(*index) {
+                    self.copy_to_clipboard(&clip);
+                }
+            }
+            Event::CopyToClipboard(selection) => {
+                if let Err(e) = daemon::send_command(selection) {
+                    eprintln!("Failed to copy: {}", e);
                 }
             }
             _ => {}
         }
         
-        // Send to core - this returns Vec<Effect> 
         let _effects = self.core.process_event(event);
-        
-        // Update the view model
         self.model = self.core.view();
     }
 
     fn load_clips(&mut self) {
-        // ClipboardManager doesn't have a direct method to get history as a Vec<Entry>
-        // The print_history method prints to stdout, so we'll need to query the DB directly
-        // For now, let's create a method that reads from the database
-        
-        let manager = self.clipboard_manager.lock();
-        
-        // We'll need to access the database directly or modify nocb to expose a method
-        // For MVP, let's use dummy data and add a TODO
-        
-        // TODO: Add a method to ClipboardManager to return Vec<Entry> or expose the database
-        let clips = vec![
-            ClipEntry {
-                id: 1,
-                hash: "abc123".to_string(),
-                content: "Sample clipboard content".to_string(),
-                time_ago: manager.format_time_ago(
-                    (std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs() - 300) as i64
-                ),
-                entry_type: "text".to_string(),
-                size_str: Some(manager.format_size(24)),
-            },
-            ClipEntry {
-                id: 2,
-                hash: "def456".to_string(),
-                content: "Another clipboard entry with more text that might be truncated".to_string(),
-                time_ago: manager.format_time_ago(
-                    (std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs() - 600) as i64
-                ),
-                entry_type: "text".to_string(),
-                size_str: Some(manager.format_size(64)),
-            },
-        ];
-        
-        drop(manager);
-        self.process_event(Event::ClipsLoaded(clips));
+        match daemon::get_clips() {
+            Ok(clips) => {
+                self.process_event(Event::ClipsLoaded(clips));
+            }
+            Err(e) => {
+                eprintln!("Failed to load clips: {}", e);
+                // show error in UI
+                self.process_event(Event::ClipsLoaded(vec![
+                    ClipEntry {
+                        id: 0,
+                        hash: "error".to_string(),
+                        content: format!("Failed to load clips: {}", e),
+                        time_ago: "!".to_string(),
+                        entry_type: "text".to_string(),
+                        size_str: None,
+                    }
+                ]));
+            }
+        }
     }
 
-    fn copy_to_clipboard(&mut self, content: String) {
-        // Use the IPC mechanism to send copy command
-        let content_clone = content.clone();
+    fn copy_to_clipboard(&mut self, clip: &ClipEntry) {
+        // send the full line from nocb print output to nocb copy
+        let selection = if clip.size_str.is_some() {
+            format!("{} {} [{}] #{}", clip.time_ago, clip.content, clip.size_str.as_ref().unwrap(), clip.hash)
+        } else {
+            format!("{} {} #{}", clip.time_ago, clip.content, clip.hash)
+        };
         
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async {
-                // Use the static send_copy_command method
-                ClipboardManager::send_copy_command(&content_clone).await.ok();
-            });
-        });
-        
+        self.process_event(Event::CopyToClipboard(selection));
         self.process_event(Event::Copied);
     }
 
@@ -189,8 +253,15 @@ impl ClipperGui {
 
 impl eframe::App for ClipperGui {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Handle keyboard shortcuts
+        // check if we should show window
+        if !*self.show_window.lock() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            return;
+        }
+
+        // handle keyboard shortcuts
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            *self.show_window.lock() = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
 
@@ -202,7 +273,7 @@ impl eframe::App for ClipperGui {
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 16.0);
 
-                // Search bar with custom styling
+                // search bar
                 let bg_alt = egui::Color32::from_rgb(0x1A, 0x1B, 0x26);
                 let pink = egui::Color32::from_rgb(0xE6, 0x00, 0x7A);
                 let cyan = egui::Color32::from_rgb(0x00, 0xFF, 0xE1);
@@ -213,10 +284,8 @@ impl eframe::App for ClipperGui {
                     .inner_margin(egui::Margin::symmetric(16.0, 12.0))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            // Icon and prompt
-                            ui.colored_label(pink, " Apps:");
+                            ui.colored_label(pink, " nocb:");
 
-                            // Search input
                             let response = ui.add_sized(
                                 [ui.available_width() - 120.0, 20.0],
                                 egui::TextEdit::singleline(&mut self.model.search_query)
@@ -225,17 +294,17 @@ impl eframe::App for ClipperGui {
                                     .desired_width(f32::INFINITY)
                             );
                             
+                            response.request_focus();
+                            
                             if response.changed() {
                                 self.process_event(Event::UpdateSearch(self.model.search_query.clone()));
                             }
 
-                            // Counter
                             ui.colored_label(cyan, format!("{}/{}",
                                 self.filtered_clips().len(),
                                 self.model.clips.len()
                             ));
 
-                            // Refresh button
                             if ui.button("⟳").clicked() {
                                 self.process_event(Event::RefreshClips);
                             }
@@ -244,7 +313,7 @@ impl eframe::App for ClipperGui {
 
                 ui.add_space(8.0);
 
-                // Clips list
+                // clips list
                 let clips = self.filtered_clips();
                 egui::ScrollArea::vertical()
                     .auto_shrink([false; 2])
@@ -264,7 +333,6 @@ impl eframe::App for ClipperGui {
 
                             let response = frame.show(ui, |ui| {
                                 ui.horizontal(|ui| {
-                                    // Time with proper color
                                     if is_selected {
                                         ui.colored_label(egui::Color32::BLACK, &clip.time_ago);
                                     } else {
@@ -273,19 +341,12 @@ impl eframe::App for ClipperGui {
 
                                     ui.separator();
 
-                                    // Content preview - truncate only for display
-                                    let preview = if clip.content.len() > 80 {
-                                        format!("{}...", clip.content.chars().take(77).collect::<String>())
-                                    } else {
-                                        clip.content.clone()
-                                    };
                                     let label = if is_selected {
-                                        ui.colored_label(egui::Color32::BLACK, preview)
+                                        ui.colored_label(egui::Color32::BLACK, &clip.content)
                                     } else {
-                                        ui.label(preview)
+                                        ui.label(&clip.content)
                                     };
 
-                                    // Size if present
                                     if let Some(size) = &clip.size_str {
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                             if is_selected {
@@ -303,6 +364,7 @@ impl eframe::App for ClipperGui {
                             if response.response.clicked() {
                                 self.process_event(Event::SelectIndex(index));
                                 self.process_event(Event::CopyClip(index));
+                                *self.show_window.lock() = false;
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                             }
 
@@ -312,7 +374,7 @@ impl eframe::App for ClipperGui {
                         }
                     });
 
-                // Handle arrow keys
+                // handle arrow keys
                 if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
                     self.process_event(Event::KeyPress(Key::Up));
                 }
@@ -321,20 +383,62 @@ impl eframe::App for ClipperGui {
                 }
                 if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
                     self.process_event(Event::KeyPress(Key::Enter));
+                    *self.show_window.lock() = false;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
 
-        // Refresh periodically
-        ctx.request_repaint_after(std::time::Duration::from_secs(1));
+        // auto-refresh
+        ctx.request_repaint_after(std::time::Duration::from_secs(5));
     }
 }
 
+// system tray support
+#[cfg(not(target_os = "linux"))]
+fn setup_tray(show_window: Arc<Mutex<bool>>) {
+    use tray_icon::{Icon, TrayIconBuilder, menu::{Menu, MenuItem}};
+    
+    std::thread::spawn(move || {
+        let menu = Menu::new();
+        let show_item = MenuItem::new("Show Clipper", true, None);
+        let quit_item = MenuItem::new("Quit", true, None);
+        
+        menu.append(&show_item).unwrap();
+        menu.append(&quit_item).unwrap();
+        
+        let icon = Icon::from_rgba(vec![255; 32 * 32 * 4], 32, 32).unwrap();
+        
+        let tray = TrayIconBuilder::new()
+            .with_menu(Box::new(menu))
+            .with_tooltip("Clipper - Clipboard Manager")
+            .with_icon(icon)
+            .build()
+            .unwrap();
+        
+        let menu_channel = tray_icon::menu::MenuEvent::receiver();
+        
+        loop {
+            if let Ok(event) = menu_channel.recv() {
+                if event.id == show_item.id() {
+                    *show_window.lock() = true;
+                } else if event.id == quit_item.id() {
+                    std::process::exit(0);
+                }
+            }
+        }
+    });
+}
+
 fn main() -> Result<(), eframe::Error> {
-    // Set renderer to glow (OpenGL) which works better in constrained environments
+    // force opengl renderer
     unsafe {
         std::env::set_var("WGPU_BACKEND", "gl");
     }
+
+    let show_window = Arc::new(Mutex::new(true));
+    
+    #[cfg(not(target_os = "linux"))]
+    setup_tray(show_window.clone());
     
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -346,9 +450,10 @@ fn main() -> Result<(), eframe::Error> {
         ..Default::default()
     };
 
+    let show_window_clone = show_window.clone();
     eframe::run_native(
         "Clipper",
         options,
-        Box::new(|cc| Ok(Box::new(ClipperGui::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(ClipperGui::new(cc, show_window_clone)))),
     )
 }
