@@ -1,4 +1,5 @@
-name: Build and Publish
+name: Build and Release
+
 on:
   push:
     tags:
@@ -6,89 +7,164 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-cli:
+  build:
     strategy:
       matrix:
         include:
+          # Linux
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            name: nocb-linux-x64
+            name: linux-x64
+          
+          # macOS
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            name: macos-x64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            name: macos-arm64
+          
+          # Windows
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: windows-x64
+
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Debug repository contents
-        run: |
-          echo "=== Current directory ==="
-          pwd
-          echo -e "\n=== Repository root contents ==="
-          ls -la
-          echo -e "\n=== Looking for Cargo.toml ==="
-          find . -name "Cargo.toml" -type f 2>/dev/null || echo "No Cargo.toml found"
-          echo -e "\n=== Git status ==="
-          git status
-          echo -e "\n=== Git log (last 5 commits) ==="
-          git log --oneline -5
-
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
-      - name: Install dependencies
+      - name: Install dependencies (Linux)
+        if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libx11-dev libxcb1-dev
+          sudo apt-get install -y libx11-dev libxcb1-dev libgtk-3-dev
 
-      - name: Build nocb binary
-        run: cargo build --release
-
-      - name: Prepare binary
+      - name: Install dependencies (macOS)
+        if: matrix.os == 'macos-latest'
         run: |
-          cp target/release/nocb ${{ matrix.name }}
-          chmod +x ${{ matrix.name }}
-          sha512sum ${{ matrix.name }} > ${{ matrix.name }}.sha512
+          brew install gtk+3
+
+      - name: Build nocb CLI
+        run: |
+          cd core
+          cargo build --release --target ${{ matrix.target }}
+
+      - name: Build clipper GUI
+        run: |
+          cd clipper
+          cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare binaries (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          mkdir -p dist
+          cp core/target/${{ matrix.target }}/release/nocb dist/nocb-${{ matrix.name }}
+          cp clipper/target/${{ matrix.target }}/release/clipper dist/clipper-${{ matrix.name }}
+          chmod +x dist/*
+          cd dist
+          sha512sum * > checksums-${{ matrix.name }}.sha512
+
+      - name: Prepare binaries (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item "core/target/${{ matrix.target }}/release/nocb.exe" "dist/nocb-${{ matrix.name }}.exe"
+          Copy-Item "clipper/target/${{ matrix.target }}/release/clipper.exe" "dist/clipper-${{ matrix.name }}.exe"
+          cd dist
+          Get-ChildItem -Filter *.exe | ForEach-Object { 
+            (Get-FileHash $_.Name -Algorithm SHA512).Hash + "  " + $_.Name | Out-File -Append "checksums-${{ matrix.name }}.sha512" -NoNewline
+          }
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
-          path: |
-            ${{ matrix.name }}
-            ${{ matrix.name }}.sha512
+          path: dist/*
 
   sign-and-release:
-    needs: build-cli
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
+
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          find artifacts -type f -exec mv {} release/ \;
 
       - name: Import GPG Key
         run: echo "${{ secrets.HQ_ROTKO_GPG }}" | gpg --batch --import
 
-      - name: Sign all binaries and hashes
+      - name: Sign all files
         run: |
-          for binary in nocb-*; do
-            if [[ ! "$binary" =~ \.(sha512|sig)$ ]]; then
+          cd release
+          for file in *; do
+            if [[ ! "$file" =~ \.sig$ ]]; then
               gpg --batch --yes --pinentry-mode loopback --passphrase "${{ secrets.GPG_PASSPHRASE }}" \
-                --detach-sign --armor --default-key hq@rotko.net --output "${binary}.sig" "$binary"
-
-              if [[ -f "${binary}.sha512" ]]; then
-                gpg --batch --yes --pinentry-mode loopback --passphrase "${{ secrets.GPG_PASSPHRASE }}" \
-                  --detach-sign --armor --default-key hq@rotko.net --output "${binary}.sha512.sig" "${binary}.sha512"
-              fi
+                --detach-sign --armor --default-key hq@rotko.net --output "${file}.sig" "$file"
             fi
           done
 
       - name: Create Release
         run: |
+          cd release
           gh release create ${{ github.ref_name }} \
             --title "nocb ${{ github.ref_name }}" \
+            --draft \
             --generate-notes \
-            nocb-* *.sig
+            --notes "## Downloads
+
+### CLI (nocb)
+- Linux x64: \`nocb-linux-x64\`
+- macOS x64: \`nocb-macos-x64\`
+- macOS ARM64: \`nocb-macos-arm64\`
+- Windows x64: \`nocb-windows-x64.exe\`
+
+### GUI (clipper)
+- Linux x64: \`clipper-linux-x64\`
+- macOS x64: \`clipper-macos-x64\`
+- macOS ARM64: \`clipper-macos-arm64\`
+- Windows x64: \`clipper-windows-x64.exe\`
+
+### Installation
+
+#### Linux/macOS
+\`\`\`bash
+# Download and install CLI
+curl -L https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/nocb-\$(uname -s | tr '[:upper:]' '[:lower:]')-x64 -o nocb
+chmod +x nocb
+sudo mv nocb /usr/local/bin/
+
+# Download and install GUI (optional)
+curl -L https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/clipper-\$(uname -s | tr '[:upper:]' '[:lower:]')-x64 -o clipper
+chmod +x clipper
+sudo mv clipper /usr/local/bin/
+\`\`\`
+
+#### Windows
+Download the \`.exe\` files and add to your PATH.
+
+### Verify signatures
+\`\`\`bash
+curl -L https://rotko.net/rotko.asc | gpg --import
+gpg --verify <file>.sig <file>
+\`\`\`" \
+            *
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
