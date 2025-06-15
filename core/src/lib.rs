@@ -20,7 +20,7 @@ const HASH_PREFIX_LEN: usize = 8;
 const MAX_CLIPBOARD_SIZE: usize = 100 * 1024 * 1024; // 100MB
 const MAX_IPC_MESSAGE_SIZE: usize = 4096;
 const IPC_MAGIC: &[u8] = b"NOCB\x00\x01";
-const LRU_CACHE_SIZE: usize = 16; // Only cache recent entries
+const LRU_CACHE_SIZE: usize = 16;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -78,7 +78,7 @@ impl Config {
 pub enum ContentType {
     Text(String),
     TextFile { hash: String, compressed: bool },
-    Image { mime: String, hash: String },
+    Image { mime: String, hash: String, width: u32, height: u32 },
 }
 
 #[derive(Debug, Clone)]
@@ -124,7 +124,11 @@ enum ClipboardContent<'a> {
 // Cached entry data
 #[derive(Clone)]
 struct CachedEntry {
-    exists_in_db: bool,
+    content_type: String,
+    inline_text: Option<String>,
+    file_path: Option<String>,
+    compressed: bool,
+    size_bytes: usize,
 }
 
 pub struct ClipboardManager {
@@ -149,7 +153,6 @@ impl ClipboardManager {
         let clipboard = Clipboard::new()
             .context("Failed to initialize clipboard")?;
 
-        // Create LRU cache
         let lru_cache = LruCache::new(NonZeroUsize::new(LRU_CACHE_SIZE).unwrap());
 
         Ok(Self {
@@ -170,7 +173,7 @@ impl ClipboardManager {
              PRAGMA mmap_size = 268435456;
              PRAGMA temp_store = MEMORY;"
         )?;
-        
+
         db.execute_batch(
             "CREATE TABLE IF NOT EXISTS entries (
                 id INTEGER PRIMARY KEY,
@@ -182,23 +185,37 @@ impl ClipboardManager {
                 inline_text TEXT,
                 mime_type TEXT,
                 size_bytes INTEGER NOT NULL,
-                compressed INTEGER DEFAULT 0
+                compressed INTEGER DEFAULT 0,
+                width INTEGER,
+                height INTEGER
             );
-            
+
             CREATE INDEX IF NOT EXISTS idx_timestamp ON entries(timestamp DESC);
             CREATE INDEX IF NOT EXISTS idx_hash ON entries(hash);"
         )?;
-        
+
+        // schema migration for existing databases
         let has_compressed: bool = db.query_row(
             "SELECT COUNT(*) FROM pragma_table_info('entries') WHERE name='compressed'",
             [],
             |row| row.get::<_, i64>(0).map(|count| count > 0)
         )?;
-        
+
         if !has_compressed {
             db.execute("ALTER TABLE entries ADD COLUMN compressed INTEGER DEFAULT 0", [])?;
         }
-        
+
+        let has_width: bool = db.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('entries') WHERE name='width'",
+            [],
+            |row| row.get::<_, i64>(0).map(|count| count > 0)
+        )?;
+
+        if !has_width {
+            db.execute("ALTER TABLE entries ADD COLUMN width INTEGER", [])?;
+            db.execute("ALTER TABLE entries ADD COLUMN height INTEGER", [])?;
+        }
+
         Ok(())
     }
 
@@ -206,10 +223,9 @@ impl ClipboardManager {
         let (tx, rx) = mpsc::channel(10);
         self.command_rx = Some(rx);
 
-        // Platform-specific socket/pipe paths
         #[cfg(unix)]
         let sock_path = std::env::temp_dir().join("nocb.sock");
-        
+
         #[cfg(windows)]
         let sock_path = PathBuf::from(r"\\.\pipe\nocb");
 
@@ -256,7 +272,7 @@ impl ClipboardManager {
 
         #[cfg(unix)]
         let _ = std::fs::remove_file(&sock_path);
-        
+
         ipc_handle.abort();
 
         Ok(())
@@ -265,14 +281,12 @@ impl ClipboardManager {
     async fn ipc_server(tx: mpsc::Sender<Command>, sock_path: PathBuf) -> Result<()> {
         let _ = std::fs::remove_file(&sock_path);
 
-        // Platform-specific IPC implementation
         #[cfg(unix)]
         {
             use tokio::net::UnixListener;
-            
+
             let listener = UnixListener::bind(&sock_path)?;
-            
-            // Set socket permissions to user-only (0700)
+
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(0o700);
             std::fs::set_permissions(&sock_path, perms)?;
@@ -280,7 +294,7 @@ impl ClipboardManager {
             loop {
                 let (mut stream, _addr) = listener.accept().await?;
 
-                // Linux-specific peer credential check
+                // peer uid verification on linux
                 #[cfg(target_os = "linux")]
                 {
                     match stream.peer_cred() {
@@ -326,11 +340,10 @@ impl ClipboardManager {
 
         #[cfg(windows)]
         {
-            // Windows: Use named pipes
             use tokio::net::windows::named_pipe::{ServerOptions, PipeMode};
-            
+
             let pipe_name = r"\\.\pipe\nocb";
-            
+
             loop {
                 let server = ServerOptions::new()
                     .first_pipe_instance(true)
@@ -368,57 +381,56 @@ impl ClipboardManager {
     pub async fn send_copy_command(selection: &str) -> Result<()> {
         use tokio::io::AsyncWriteExt;
         use tokio::time::timeout;
-        
+
         #[cfg(unix)]
         {
             use tokio::net::UnixStream;
-            
+
             let sock_path = std::env::temp_dir().join("nocb.sock");
-            
+
             let mut stream = timeout(
                 Duration::from_secs(2),
                 UnixStream::connect(&sock_path)
             ).await
             .context("Connection timeout")?
             .context("Failed to connect to daemon")?;
-            
+
             let mut msg = Vec::with_capacity(IPC_MAGIC.len() + 5 + selection.len());
             msg.extend_from_slice(IPC_MAGIC);
             msg.extend_from_slice(format!("COPY:{}", selection).as_bytes());
-            
+
             stream.write_all(&msg).await?;
             stream.shutdown().await?;
         }
-        
+
         #[cfg(windows)]
         {
             use tokio::net::windows::named_pipe::ClientOptions;
-            
+
             let pipe_name = r"\\.\pipe\nocb";
-            
+
             let mut client = timeout(
                 Duration::from_secs(2),
                 ClientOptions::new().open(pipe_name)
             ).await
             .context("Connection timeout")?
             .context("Failed to connect to daemon")?;
-            
+
             let mut msg = Vec::with_capacity(IPC_MAGIC.len() + 5 + selection.len());
             msg.extend_from_slice(IPC_MAGIC);
             msg.extend_from_slice(format!("COPY:{}", selection).as_bytes());
-            
+
             client.write_all(&msg).await?;
         }
-        
+
         Ok(())
     }
 
     async fn poll_clipboard(&mut self) -> Result<()> {
-        // Try to get clipboard content without blocking
+        // non-blocking clipboard check
         let content = {
             match self.clipboard.try_write() {
                 Some(mut clipboard) => {
-                    // Try to get text first
                     if let Ok(text) = clipboard.get_text() {
                         Some(ClipboardContent::Text(text))
                     } else if let Ok(img) = clipboard.get_image() {
@@ -427,7 +439,7 @@ impl ClipboardManager {
                         None
                     }
                 },
-                None => return Ok(()), // Skip this poll if clipboard is busy
+                None => return Ok(()),
             }
         };
 
@@ -445,13 +457,11 @@ impl ClipboardManager {
                     };
 
                     let hash = self.hash_data(text.as_bytes());
-                    
-                    // Quick check against last hash
+
                     if self.last_clipboard_hash.as_ref() == Some(&hash) {
                         return Ok(());
                     }
-                    
-                    // Check if already exists (LRU cache, then DB)
+
                     if self.entry_exists(&hash)? {
                         self.last_clipboard_hash = Some(hash);
                         return Ok(());
@@ -473,14 +483,14 @@ impl ClipboardManager {
                     Some(Entry::new(content, "unknown".to_string(), hash, size))
                 }
                 ClipboardContent::Image(img) => {
+                    let (width, height) = (img.width as u32, img.height as u32);
                     let data = self.image_to_png(&img)?;
                     let hash = self.hash_data(&data);
-                    
+
                     if self.last_clipboard_hash.as_ref() == Some(&hash) {
                         return Ok(());
                     }
-                    
-                    // Check if already exists
+
                     if self.entry_exists(&hash)? {
                         self.last_clipboard_hash = Some(hash);
                         return Ok(());
@@ -494,6 +504,8 @@ impl ClipboardManager {
                     let content = ContentType::Image {
                         mime: "image/png".to_string(),
                         hash: stored_hash.clone(),
+                        width,
+                        height,
                     };
 
                     Some(Entry::new(content, "unknown".to_string(), stored_hash, data.len()))
@@ -511,53 +523,41 @@ impl ClipboardManager {
         Ok(())
     }
 
-    // Optimized entry existence check with LRU cache
+    // check cache first, then database
     fn entry_exists(&self, hash: &str) -> Result<bool> {
-        // First check LRU cache
         {
-            let mut cache = self.lru_cache.write();
-            if let Some(cached) = cache.get(hash) {
-                if cached.exists_in_db {
-                    // Update timestamp in DB since it's being accessed again
-                    let _ = self.db.execute(
-                        "UPDATE entries SET timestamp = ?1 WHERE hash = ?2",
-                        params![SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64, hash],
-                    );
-                }
-                return Ok(cached.exists_in_db);
+            let cache = self.lru_cache.read();
+            if cache.contains(hash) {
+                // update access time
+                let _ = self.db.execute(
+                    "UPDATE entries SET timestamp = ?1 WHERE hash = ?2",
+                    params![SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64, hash],
+                );
+                return Ok(true);
             }
         }
-        
-        // Not in cache, check DB
+
         let exists: bool = self.db.query_row(
             "SELECT 1 FROM entries WHERE hash = ?1",
             params![hash],
             |_| Ok(true),
         ).optional()?.unwrap_or(false);
-        
-        // Add to cache
-        {
-            let mut cache = self.lru_cache.write();
-            cache.put(hash.to_string(), CachedEntry {
-                exists_in_db: exists,
-            });
-        }
-        
+
         Ok(exists)
     }
 
     fn image_to_png(&self, img: &ImageData) -> Result<Vec<u8>> {
         use image::{ImageBuffer, Rgba};
-        
+
         let width = img.width as u32;
         let height = img.height as u32;
-        
+
         let img_buffer = ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(
             width,
             height,
             img.bytes.to_vec()
         ).context("Failed to create image buffer")?;
-        
+
         let mut png_data = Vec::new();
         let encoder = image::codecs::png::PngEncoder::new(&mut png_data);
         image::ImageEncoder::write_image(
@@ -567,7 +567,7 @@ impl ClipboardManager {
             height,
             image::ExtendedColorType::Rgba8
         )?;
-        
+
         Ok(png_data)
     }
 
@@ -591,7 +591,7 @@ impl ClipboardManager {
         } else {
             format!("{}.txt", hash)
         };
-        
+
         let path = self.config.cache_dir.join("blobs").join(&filename);
         if !path.exists() {
             if compress {
@@ -612,14 +612,6 @@ impl ClipboardManager {
             return Ok(());
         }
 
-        // Add to LRU cache immediately
-        {
-            let mut cache = self.lru_cache.write();
-            cache.put(entry.hash.clone(), CachedEntry {
-                exists_in_db: true,
-            });
-        }
-
         // Add to DB
         match &entry.content {
             ContentType::Text(text) => {
@@ -628,6 +620,16 @@ impl ClipboardManager {
                      VALUES (?1, ?2, ?3, 'text', ?4, ?5)",
                     params![entry.hash, entry.timestamp as i64, entry.app_name, text, entry.size_bytes as i64],
                 )?;
+
+                // Add to cache
+                let mut cache = self.lru_cache.write();
+                cache.put(entry.hash.clone(), CachedEntry {
+                    content_type: "text".to_string(),
+                    inline_text: Some(text.clone()),
+                    file_path: None,
+                    compressed: false,
+                    size_bytes: entry.size_bytes,
+                });
             }
             ContentType::TextFile { hash, compressed } => {
                 let file_path = if *compressed {
@@ -640,61 +642,91 @@ impl ClipboardManager {
                      VALUES (?1, ?2, ?3, 'text_file', ?4, ?5, ?6)",
                     params![entry.hash, entry.timestamp as i64, entry.app_name, file_path, entry.size_bytes as i64, *compressed as i64],
                 )?;
+
+                // Add to cache
+                let mut cache = self.lru_cache.write();
+                cache.put(entry.hash.clone(), CachedEntry {
+                    content_type: "text_file".to_string(),
+                    inline_text: None,
+                    file_path: Some(file_path),
+                    compressed: *compressed,
+                    size_bytes: entry.size_bytes,
+                });
             }
-            ContentType::Image { mime, hash } => {
+            ContentType::Image { mime, hash, width, height } => {
                 self.db.execute(
-                    "INSERT OR REPLACE INTO entries (hash, timestamp, app_name, content_type, file_path, mime_type, size_bytes)
-                     VALUES (?1, ?2, ?3, 'image', ?4, ?5, ?6)",
-                    params![entry.hash, entry.timestamp as i64, entry.app_name, hash, mime, entry.size_bytes as i64],
+                    "INSERT OR REPLACE INTO entries (hash, timestamp, app_name, content_type, file_path, mime_type, size_bytes, width, height)
+                     VALUES (?1, ?2, ?3, 'image', ?4, ?5, ?6, ?7, ?8)",
+                    params![entry.hash, entry.timestamp as i64, entry.app_name, hash, mime, entry.size_bytes as i64, *width as i64, *height as i64],
                 )?;
+
+                // Add to cache
+                let mut cache = self.lru_cache.write();
+                cache.put(entry.hash.clone(), CachedEntry {
+                    content_type: "image".to_string(),
+                    inline_text: None,
+                    file_path: Some(hash.clone()),
+                    compressed: false,
+                    size_bytes: entry.size_bytes,
+                });
             }
         }
-        
+
         Ok(())
     }
 
     fn cleanup_old_entries(&mut self) -> Result<()> {
-        let tx = self.db.transaction()?;
-        
-        let mut stmt = tx.prepare(
-            "SELECT hash, file_path FROM entries
+        let mut stmt = self.db.prepare(
+            "SELECT hash FROM entries 
              WHERE id NOT IN (
                  SELECT id FROM entries ORDER BY timestamp DESC LIMIT ?1
              )"
         )?;
-
-        let to_delete: Vec<(String, Option<String>)> = stmt.query_map(
+        
+        let hashes_to_delete: Vec<String> = stmt.query_map(
             params![self.config.max_entries as i64],
-            |row| Ok((row.get(0)?, row.get(1)?))
+            |row| row.get(0)
         )?.collect::<Result<Vec<_>, _>>()?;
 
         drop(stmt);
 
-        for (hash, file_path) in &to_delete {
-            if let Some(file_path) = file_path {
-                let path = self.config.cache_dir.join("blobs").join(file_path);
-                let _ = fs::remove_file(path);
-            } else {
-                let path = self.config.cache_dir.join("blobs").join(hash);
-                let _ = fs::remove_file(path);
-            }
+        for hash in &hashes_to_delete {
+            self.delete_entry(hash)?;
         }
 
-        tx.execute(
-            "DELETE FROM entries WHERE id NOT IN (
-                SELECT id FROM entries ORDER BY timestamp DESC LIMIT ?1
-            )",
-            params![self.config.max_entries as i64],
-        )?;
+        Ok(())
+    }
 
-        tx.commit()?;
+    fn delete_entry(&mut self, hash: &str) -> Result<()> {
+        let file_path: Option<String> = self.db.query_row(
+            "SELECT file_path FROM entries WHERE hash = ?1",
+            params![hash],
+            |row| row.get(0),
+        ).optional()?;
+
+        self.db.execute("DELETE FROM entries WHERE hash = ?1", params![hash])?;
+
+        {
+            let mut cache = self.lru_cache.write();
+            cache.pop(hash);
+        }
+
+        if let Some(file_path) = file_path {
+            let path = self.config.cache_dir.join("blobs").join(file_path);
+            let _ = fs::remove_file(path);
+        } else {
+            // backward compatibility
+            let path = self.config.cache_dir.join("blobs").join(hash);
+            let _ = fs::remove_file(path);
+        }
+
         Ok(())
     }
 
     // Helper methods for cleaner code
     pub fn read_text_preview(&self, file_path: &str, max_len: usize) -> Option<String> {
         let path = self.config.cache_dir.join("blobs").join(file_path);
-        
+
         if file_path.ends_with(".zst") {
             self.read_compressed_preview(&path, max_len)
         } else {
@@ -704,12 +736,12 @@ impl ClipboardManager {
 
     pub fn read_compressed_preview(&self, path: &Path, max_len: usize) -> Option<String> {
         use zstd::stream::read::Decoder;
-        
+
         let file = fs::File::open(path).ok()?;
         let mut decoder = Decoder::new(file).ok()?;
-        let mut buffer = vec![0u8; max_len * 4]; // UTF-8 can be up to 4 bytes per char
+        let mut buffer = vec![0u8; max_len * 4];
         let n = std::io::Read::read(&mut decoder, &mut buffer).ok()?;
-        
+
         String::from_utf8(buffer[..n].to_vec()).ok()
     }
 
@@ -722,23 +754,25 @@ impl ClipboardManager {
     pub fn format_time_ago(&self, timestamp: i64) -> String {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         let ago_secs = now.saturating_sub(timestamp as u64);
-        
+
         if ago_secs < 60 {
-            format!("-{}s", ago_secs)
+            format!("{}s", ago_secs)
         } else if ago_secs < 3600 {
-            format!("-{}m", ago_secs / 60)
+            format!("{}m", ago_secs / 60)
         } else if ago_secs < 86400 {
-            format!("-{}h", ago_secs / 3600)
+            format!("{}h", ago_secs / 3600)
         } else {
-            format!("-{}d", ago_secs / 86400)
+            format!("{}d", ago_secs / 86400)
         }
     }
 
     pub fn format_size(&self, bytes: i64) -> String {
         if bytes < 1024 {
             format!("{}B", bytes)
+        } else if bytes < 1024 * 1024 {
+            format!("{}K", bytes / 1024)
         } else {
-            format!("{}KB", bytes / 1024)
+            format!("{}M", bytes / (1024 * 1024))
         }
     }
 
@@ -761,7 +795,7 @@ impl ClipboardManager {
         }
 
         let mut stmt = self.db.prepare(
-            "SELECT hash, app_name, content_type, inline_text, file_path, mime_type, size_bytes, timestamp
+            "SELECT hash, app_name, content_type, inline_text, file_path, mime_type, size_bytes, timestamp, width, height
              FROM entries ORDER BY timestamp DESC LIMIT ?1"
         )?;
 
@@ -774,43 +808,60 @@ impl ClipboardManager {
             let mime_type: Option<String> = row.get(5)?;
             let size_bytes: i64 = row.get(6)?;
             let timestamp: i64 = row.get(7)?;
+            let width: Option<i64> = row.get(8)?;
+            let height: Option<i64> = row.get(9)?;
 
-            Ok((hash, app_name, content_type, inline_text, file_path, mime_type, size_bytes, timestamp))
+            Ok((hash, app_name, content_type, inline_text, file_path, mime_type, size_bytes, timestamp, width, height))
         })?;
 
         for row in rows {
-            let (hash, app_name, content_type, inline_text, file_path, mime_type, size_bytes, timestamp) = row?;
+            let (hash, _app_name, content_type, inline_text, file_path, mime_type, size_bytes, timestamp, width, height) = row?;
             let time_str = self.format_time_ago(timestamp);
+            let hash_prefix = &hash[..HASH_PREFIX_LEN.min(hash.len())];
+            
+            let size_str = self.format_size(size_bytes);
 
             match content_type.as_str() {
                 "text" => {
                     if let Some(text) = inline_text {
-                        let display = self.truncate_display(&text);
-                        println!("{} {}", time_str, display.replace('\n', " "));
+                        let available_chars = 80 - time_str.len() - 1 - 9 - 1;
+                        let display = self.truncate_to_fit(&text, available_chars);
+                        println!("{} {} #{}", time_str, display, hash_prefix);
                     }
                 }
                 "text_file" => {
                     if let Some(fp) = file_path {
-                        let preview = self.read_text_preview(&fp, self.config.max_display_length)
-                            .map(|p| self.truncate_display(&p))
+                        let available_chars = 80 - time_str.len() - 1 - 9 - 1 - size_str.len() - 3;
+                        let preview = self.read_text_preview(&fp, available_chars * 4)
+                            .map(|p| self.truncate_to_fit(&p, available_chars))
                             .filter(|p| !p.is_empty());
 
                         if let Some(display) = preview {
-                            let size_str = self.format_size(size_bytes);
-                            println!("{} {} [{}]", time_str, display.replace('\n', " "), size_str);
+                            println!("{} {} [{}] #{}", time_str, display, size_str, hash_prefix);
                         } else {
-                            // Fallback: show hash if can't read file
-                            println!("{} [Text: {}] {}", 
-                                time_str, 
-                                self.format_size(size_bytes),
-                                &hash[..HASH_PREFIX_LEN.min(hash.len())]
-                            );
+                            println!("{} [Text: {}] #{}", time_str, size_str, hash_prefix);
                         }
                     }
                 }
                 "image" => {
-                    let mime = mime_type.unwrap_or_else(|| "image/unknown".to_string());
-                    println!("{} {} {} {}", time_str, mime, app_name, hash);
+                    let mime_short = mime_type.as_ref()
+                        .map(|m| m.split('/').last().unwrap_or("?"))
+                        .unwrap_or("?");
+                    
+                    if let (Some(w), Some(h)) = (width, height) {
+                        let dims_str = format!("{}x{}px", w, h);
+                        let available = 80 - time_str.len() - 1 - 9 - 7 - mime_short.len() - size_str.len() - 2;
+                        if dims_str.len() <= available {
+                            println!("{} [IMG:{} {} {}] #{}", 
+                                time_str, dims_str, mime_short, size_str, hash_prefix);
+                        } else {
+                            println!("{} [IMG:{} {}] #{}", 
+                                time_str, mime_short, size_str, hash_prefix);
+                        }
+                    } else {
+                        println!("{} [IMG:{} {}] #{}", 
+                            time_str, mime_short, size_str, hash_prefix);
+                    }
                 }
                 _ => {}
             }
@@ -819,139 +870,188 @@ impl ClipboardManager {
         Ok(())
     }
 
+    fn truncate_to_fit(&self, text: &str, max_chars: usize) -> String {
+        let text = text.replace('\n', " ").replace('\t', " ");
+        
+        if text.len() <= max_chars {
+            text
+        } else {
+            let mut end = max_chars.saturating_sub(1);
+            while !text.is_char_boundary(end) && end > 0 {
+                end -= 1;
+            }
+            format!("{}…", &text[..end])
+        }
+    }
+
     async fn copy_selection(&mut self, selection: &str) -> Result<()> {
-        // Strip timestamp prefix (-5m, -2h, -3d, -10s) at the beginning
-        let selection = if selection.starts_with("-") {
-            if let Some(space_pos) = selection.find(' ') {
-                let timestamp_part = &selection[1..space_pos];
-                // Check if it's a valid timestamp format
-                let is_timestamp = timestamp_part.chars()
-                    .take_while(|c| c.is_ascii_digit())
-                    .count() > 0
-                    && timestamp_part.chars()
-                        .skip_while(|c| c.is_ascii_digit())
-                        .all(|c| matches!(c, 's' | 'm' | 'h' | 'd'));
-                
-                if is_timestamp {
-                    selection[space_pos + 1..].trim()
-                } else {
-                    selection
+        // extract hash from #hash format anywhere in string
+        if let Some(hash_pos) = selection.find('#') {
+            let hash_start = hash_pos + 1;
+            let hash_end = selection[hash_start..]
+                .find(|c: char| c.is_whitespace())
+                .map(|i| hash_start + i)
+                .unwrap_or(selection.len());
+            
+            let hash = &selection[hash_start..hash_end];
+            
+            if !hash.is_empty() && hash.len() >= 8 {
+                match self.copy_by_hash(hash).await {
+                    Ok(_) => return Ok(()),
+                    Err(_) => {
+                        // fallback to literal copy
+                    }
                 }
-            } else {
-                selection
             }
-        } else {
-            selection
-        };
-        
-        if selection.starts_with("image/") {
-            self.copy_image_selection(selection).await
-        } else if selection.starts_with("[Text:") && selection.contains(']') {
-            // Large text file format: [Text: SIZE] HASH
-            self.copy_large_text_selection(selection).await
-        } else if selection.ends_with(']') && selection.contains(" [") {
-            // Text with size indicator: TEXT [SIZE]
-            if let Some(bracket_pos) = selection.rfind(" [") {
-                let text_part = &selection[..bracket_pos];
-                self.copy_text_selection(text_part).await
-            } else {
-                self.copy_text_selection(selection).await
-            }
-        } else {
-            // Regular text
-            self.copy_text_selection(selection).await
         }
-    }
 
-    async fn copy_text_selection(&self, text: &str) -> Result<()> {
-        // Copy text as-is, no modifications
+        // copy as literal text
         let mut clipboard = self.clipboard.write();
-        clipboard.set_text(text.to_string())?;
+        clipboard.set_text(selection.to_string())?;
         Ok(())
     }
 
-    async fn copy_large_text_selection(&self, selection: &str) -> Result<()> {
-        // Format: [Text: SIZE] HASH
-        // Find the closing bracket and extract hash after it
-        if let Some(bracket_pos) = selection.find(']') {
-            let hash_part = selection[bracket_pos + 1..].trim();
-            if !hash_part.is_empty() {
-                let row: (String, Option<bool>) = self.db.query_row(
-                    "SELECT file_path, compressed FROM entries WHERE hash LIKE ?1 || '%' ORDER BY timestamp DESC LIMIT 1",
-                    params![hash_part],
-                    |row| Ok((row.get(0)?, row.get::<_, Option<i64>>(1)?.map(|v| v != 0))),
-                )?;
+    async fn copy_by_hash(&self, hash_prefix: &str) -> Result<()> {
+        // cache lookup first for performance
+        {
+            let cache = self.lru_cache.read();
+            for (full_hash, cached) in cache.iter() {
+                if full_hash.starts_with(hash_prefix) {
+                    match cached.content_type.as_str() {
+                        "text" => {
+                            if let Some(text) = &cached.inline_text {
+                                let mut clipboard = self.clipboard.write();
+                                clipboard.set_text(text.clone())?;
+                                return Ok(());
+                            }
+                        }
+                        "text_file" => {
+                            if let Some(fp) = &cached.file_path {
+                                let path = self.config.cache_dir.join("blobs").join(fp);
+                                let mut text = if cached.compressed {
+                                    use zstd::stream::read::Decoder;
+                                    let file = fs::File::open(path)?;
+                                    let mut decoder = Decoder::new(file)?;
+                                    let mut text = String::new();
+                                    decoder.read_to_string(&mut text)?;
+                                    text
+                                } else {
+                                    fs::read_to_string(path)?
+                                };
 
-                let (file_path, compressed) = row;
-                let path = self.config.cache_dir.join("blobs").join(&file_path);
+                                let mut clipboard = self.clipboard.write();
+                                clipboard.set_text(text.clone())?;
+                                text.zeroize();
+                                return Ok(());
+                            }
+                        }
+                        "image" => {
+                            if let Some(fp) = &cached.file_path {
+                                let path = self.config.cache_dir.join("blobs").join(fp);
+                                let data = fs::read(&path)?;
+                                
+                                let img = image::load_from_memory(&data)?;
+                                let rgba = img.to_rgba8();
+                                let (width, height) = (rgba.width() as usize, rgba.height() as usize);
 
-                let mut text = if compressed.unwrap_or(false) {
-                    use zstd::stream::read::Decoder;
-                    let file = fs::File::open(path)?;
-                    let mut decoder = Decoder::new(file)?;
-                    let mut text = String::new();
-                    decoder.read_to_string(&mut text)?;
-                    text
-                } else {
-                    fs::read_to_string(path)?
-                };
+                                let img_data = ImageData {
+                                    width,
+                                    height,
+                                    bytes: rgba.into_raw().into(),
+                                };
 
-                let mut clipboard = self.clipboard.write();
-                clipboard.set_text(text.clone())?;
-                
-                text.zeroize();
+                                let mut clipboard = self.clipboard.write();
+                                clipboard.set_image(img_data)?;
+                                return Ok(());
+                            }
+                        }
+                        _ => {}
+                    }
+                    break;
+                }
             }
         }
-        
-        Ok(())
-    }
 
-    async fn copy_image_selection(&self, selection: &str) -> Result<()> {
-        // Format: image/TYPE APP_NAME HASH
-        let parts: Vec<&str> = selection.split_whitespace().collect();
-        if parts.len() < 3 {
-            anyhow::bail!("Invalid image selection format");
+        // cache miss, query database
+        let row: Option<(String, Option<String>, Option<String>, Option<bool>)> = self.db.query_row(
+            "SELECT content_type, inline_text, file_path, compressed 
+             FROM entries WHERE hash LIKE ?1 || '%' 
+             ORDER BY timestamp DESC LIMIT 1",
+            params![hash_prefix],
+            |row| Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get::<_, Option<i64>>(3)?.map(|v| v != 0)
+            )),
+        ).optional()?;
+
+        if let Some((content_type, inline_text, file_path, compressed)) = row {
+            match content_type.as_str() {
+                "text" => {
+                    if let Some(text) = inline_text {
+                        let mut clipboard = self.clipboard.write();
+                        clipboard.set_text(text)?;
+                    }
+                }
+                "text_file" => {
+                    if let Some(fp) = file_path {
+                        let path = self.config.cache_dir.join("blobs").join(&fp);
+                        let mut text = if compressed.unwrap_or(false) {
+                            use zstd::stream::read::Decoder;
+                            let file = fs::File::open(path)?;
+                            let mut decoder = Decoder::new(file)?;
+                            let mut text = String::new();
+                            decoder.read_to_string(&mut text)?;
+                            text
+                        } else {
+                            fs::read_to_string(path)?
+                        };
+
+                        let mut clipboard = self.clipboard.write();
+                        clipboard.set_text(text.clone())?;
+                        text.zeroize();
+                    }
+                }
+                "image" => {
+                    if let Some(fp) = file_path {
+                        let path = self.config.cache_dir.join("blobs").join(&fp);
+                        let data = fs::read(&path)?;
+                        
+                        let img = image::load_from_memory(&data)?;
+                        let rgba = img.to_rgba8();
+                        let (width, height) = (rgba.width() as usize, rgba.height() as usize);
+
+                        let img_data = ImageData {
+                            width,
+                            height,
+                            bytes: rgba.into_raw().into(),
+                        };
+
+                        let mut clipboard = self.clipboard.write();
+                        clipboard.set_image(img_data)?;
+                    }
+                }
+                _ => anyhow::bail!("Unknown content type"),
+            }
+        } else {
+            anyhow::bail!("Entry not found for hash: {}", hash_prefix);
         }
-
-        let hash = parts[2];
-
-        let path = self.config.cache_dir.join("blobs").join(hash);
-        let data = fs::read(&path).context("Failed to read image file")?;
-
-        // Decode PNG to raw RGBA
-        let img = image::load_from_memory(&data)?;
-        let rgba = img.to_rgba8();
-        let (width, height) = (rgba.width() as usize, rgba.height() as usize);
-        
-        let img_data = ImageData {
-            width,
-            height,
-            bytes: rgba.into_raw().into(),
-        };
-
-        let mut clipboard = self.clipboard.write();
-        clipboard.set_image(img_data)?;
 
         Ok(())
     }
 
     pub fn clear(&mut self) -> Result<()> {
-        self.db.execute("DELETE FROM entries", [])?;
+        let mut stmt = self.db.prepare("SELECT hash FROM entries")?;
+        let all_hashes: Vec<String> = stmt.query_map(
+            [],
+            |row| row.get(0)
+        )?.collect::<Result<Vec<_>, _>>()?;
 
-        // Clear the LRU cache
-        {
-            let mut cache = self.lru_cache.write();
-            cache.clear();
-        }
+        drop(stmt);
 
-        let blobs_dir = self.config.cache_dir.join("blobs");
-        if blobs_dir.exists() {
-            for entry in fs::read_dir(&blobs_dir)? {
-                let entry = entry?;
-                if entry.file_type()?.is_file() {
-                    fs::remove_file(entry.path())?;
-                }
-            }
+        for hash in &all_hashes {
+            self.delete_entry(hash)?;
         }
 
         Ok(())
@@ -959,29 +1059,14 @@ impl ClipboardManager {
 
     pub fn prune(&mut self, hashes: &[String]) -> Result<()> {
         for hash in hashes {
-            let file_path: Option<String> = self.db.query_row(
-                "SELECT file_path FROM entries WHERE hash = ?1",
-                params![hash],
-                |row| row.get(0),
-            ).optional()?;
-
-            self.db.execute("DELETE FROM entries WHERE hash = ?1", params![hash])?;
-
-            if let Some(file_path) = file_path {
-                let path = self.config.cache_dir.join("blobs").join(file_path);
-                let _ = fs::remove_file(path);
-            } else {
-                let path = self.config.cache_dir.join("blobs").join(hash);
-                let _ = fs::remove_file(path);
-            }
+            self.delete_entry(hash)?;
         }
-
         Ok(())
     }
 
     pub fn get_history(&self, limit: usize) -> Result<Vec<Entry>> {
         let mut stmt = self.db.prepare(
-            "SELECT id, hash, timestamp, app_name, content_type, inline_text, file_path, mime_type, size_bytes, compressed
+            "SELECT id, hash, timestamp, app_name, content_type, inline_text, file_path, mime_type, size_bytes, compressed, width, height
              FROM entries ORDER BY timestamp DESC LIMIT ?1"
         )?;
 
@@ -992,10 +1077,12 @@ impl ClipboardManager {
             let app_name: String = row.get(3)?;
             let content_type: String = row.get(4)?;
             let inline_text: Option<String> = row.get(5)?;
-            let file_path: Option<String> = row.get(6)?;
+            let _file_path: Option<String> = row.get(6)?;
             let mime_type: Option<String> = row.get(7)?;
             let size_bytes: i64 = row.get(8)?;
             let compressed: Option<bool> = row.get::<_, Option<i64>>(9)?.map(|v| v != 0);
+            let width: Option<i64> = row.get(10)?;
+            let height: Option<i64> = row.get(11)?;
 
             let content = match content_type.as_str() {
                 "text" => ContentType::Text(inline_text.unwrap_or_default()),
@@ -1006,6 +1093,8 @@ impl ClipboardManager {
                 "image" => ContentType::Image {
                     mime: mime_type.unwrap_or_else(|| "image/unknown".to_string()),
                     hash: hash.clone(),
+                    width: width.unwrap_or(0) as u32,
+                    height: height.unwrap_or(0) as u32,
                 },
                 _ => ContentType::Text("Unknown".to_string()),
             };
@@ -1022,5 +1111,40 @@ impl ClipboardManager {
         .collect::<Result<Vec<_>, _>>()?;
 
         Ok(entries)
+    }
+
+    pub fn get_entries(&self, limit: usize) -> Result<Vec<(String, String, String, i64, i64)>> {
+        let mut stmt = self.db.prepare(
+            "SELECT hash, content_type, inline_text, file_path, size_bytes, timestamp
+             FROM entries ORDER BY timestamp DESC LIMIT ?1"
+        )?;
+
+        let rows = stmt.query_map([limit as i64], |row| {
+            let hash: String = row.get(0)?;
+            let content_type: String = row.get(1)?;
+            let inline_text: Option<String> = row.get(2)?;
+            let file_path: Option<String> = row.get(3)?;
+            let size_bytes: i64 = row.get(4)?;
+            let timestamp: i64 = row.get(5)?;
+
+            let content = match content_type.as_str() {
+                "text" => inline_text.unwrap_or_else(|| "[Empty]".to_string()),
+                "text_file" => {
+                    if let Some(fp) = file_path {
+                        self.read_text_preview(&fp, self.config.max_display_length)
+                            .unwrap_or_else(|| format!("[Text: {}]", self.format_size(size_bytes)))
+                    } else {
+                        format!("[Text: {}]", self.format_size(size_bytes))
+                    }
+                }
+                "image" => format!("[Image: {}]", self.format_size(size_bytes)),
+                _ => "[Unknown]".to_string(),
+            };
+
+            Ok((hash, content, content_type, size_bytes, timestamp))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(rows)
     }
 }

@@ -1,74 +1,125 @@
 # nocb
 
-X11 clipboard manager with compression and blob storage.
+nearly optimal clipboard manager - fast, compressed, hash-based storage
 
-## Features
+## features
 
-- Content-addressed storage with blake3 hashing
-- Automatic compression for large text (zstd)
-- Image support (png/jpeg/gif/bmp/webp)
-- SQLite database with WAL mode
-- 100MB clipboard entry support
-- Zero-copy clipboard serving
-- Memory zeroization for sensitive data
+- **hash-based storage** - blake3 content addressing, instant deduplication
+- **compression** - automatic zstd compression for text >4KB
+- **images** - full support with dimensions (png/jpeg/gif/bmp/webp)
+- **performance** - sqlite with WAL, LRU cache, 100MB entry support
+- **security** - unix socket with uid verification, memory zeroization
+- **rofi integration** - 80-char entries with hash-based retrieval
 
-## Install
+## install
 
 ```bash
-cargo install --path .
+cargo install --path core
+# or
+cargo build --release
+cp target/release/nocb ~/.local/bin/
 ```
 
-## Usage
+## usage
 
-Start daemon:
+### daemon setup
+
 ```bash
-nocb daemon &
+# manual start
+nocb daemon
+
+# systemd service
+cat > ~/.config/systemd/user/nocb.service << EOF
+[Unit]
+Description=NOCB Clipboard Manager
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=$HOME/.local/bin/nocb daemon
+Restart=on-failure
+Environment="DISPLAY=:0"
+
+[Install]
+WantedBy=default.target
+EOF
+
+systemctl --user enable --now nocb
 ```
 
-List history:
-```bash
-nocb print
-```
+### usage
 
-Copy from history (with fzf):
 ```bash
+# minimalistic use with fzf
 nocb print | fzf | nocb copy
 ```
 
-Use with rofi
+### keybindings
+
 ```bash
-nocb print | rofi -dmenu -i -p "clipboard" | nocb copy
+# sxhkd with rofi example
+echo 'super + b
+    ~/.local/bin/nocb print | rofi -dmenu -i -p "clipboard" | ~/.local/bin/nocb copy' >> ~/.config/sxhkd/sxhkdrc
 ```
 
-Clear history:
+### commands
+
 ```bash
-nocb clear
+nocb print                      # list history (newest first)
+nocb copy <selection>           # copy by selection or hash
+nocb clear                      # wipe all history
+nocb prune <hash1> <hash2>      # remove specific entries
 ```
 
-## Configuration
+## display format
 
-`~/.config/nocb/config.toml` is created on first run:
+```
+3m use anyhow::{Context, Result}; use arboard… #b9ef2033
+27s Preview of large text file… [38K] #a7c4f892
+1d [IMG:1920x1080px png 256K] #d8e9f023
+```
+
+- **time** - relative timestamp (s/m/h/d)
+- **content** - truncated to fit 80 chars
+- **size** - file size for large entries
+- **hash** - 8-char prefix for retrieval
+
+## configuration
+
+`~/.config/nocb/config.toml`:
 
 ```toml
 cache_dir = "~/.cache/nocb"
 max_entries = 10000
 max_display_length = 200
+max_print_entries = 1000
+blacklist = ["KeePassXC", "1Password"]
 trim_whitespace = true
-use_primary = false
-blacklist = ["KeePassXC"]
+compress_threshold = 4096
+static_entries = []  # pinned entries
 ```
 
-## Storage
+## storage
 
-- Database: `~/.cache/nocb/index.db`
-- Blobs: `~/.cache/nocb/blobs/`
-- Large text (>4KB) is compressed with zstd
+- **database**: `~/.cache/nocb/index.db` - metadata, hashes, timestamps
+- **blobs**: `~/.cache/nocb/blobs/` - compressed text, images
+- **socket**: `/tmp/nocb.sock` - ipc with uid verification
 
-## Requirements
+## implementation
 
-- X11 (Linux only)
-- Rust 1.70+
+- rust with tokio async runtime
+- arboard for cross-platform clipboard
+- sqlite with prepared statements
+- zstd compression level 3
+- lru cache for recent entries
+- non-blocking clipboard polling
 
-## License
+## requirements
+
+- rust 1.70+
+- x11 or wayland (linux)
+- systemd (optional)
+
+## license
 
 MIT

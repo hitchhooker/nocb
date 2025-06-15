@@ -6,8 +6,8 @@ use tokio::signal;
 
 #[derive(Parser)]
 #[command(name = "nocb")]
-#[command(version = "1.0.0")]
-#[command(about = "Nearly optimal clipboard manager")]
+#[command(version = "1.1.0")]
+#[command(about = "Nearly Optimal ClipBoard manager")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -39,20 +39,18 @@ enum Commands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Platform-specific display check
+    // platform-specific display check
     #[cfg(target_os = "linux")]
     {
-        // Check for either X11 or Wayland
         if std::env::var("DISPLAY").is_err() && std::env::var("WAYLAND_DISPLAY").is_err() {
             eprintln!("Error: No display server available (neither X11 nor Wayland)");
             std::process::exit(1);
         }
     }
 
-    // On macOS and Windows, arboard handles the clipboard natively
     #[cfg(not(target_os = "linux"))]
     {
-        // No display check needed for macOS/Windows
+        // arboard handles clipboard natively on macos/windows
     }
 
     let config = Config::load().context("Failed to load configuration")?;
@@ -79,13 +77,11 @@ async fn main() -> Result<()> {
         }
         Commands::Copy { selection } => {
             let selection = if selection.is_empty() {
-                // Read from stdin
                 use std::io::{self, Read};
                 let mut buffer = String::new();
                 io::stdin().read_to_string(&mut buffer)?;
                 buffer.trim().to_string()
             } else {
-                // Join all arguments with spaces
                 selection.join(" ")
             };
 
@@ -93,8 +89,6 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
 
-            // Add debug output
-            eprintln!("DEBUG: Sending copy command for: {:?}", selection);
             ClipboardManager::send_copy_command(&selection).await?;
         }
         Commands::Clear => {

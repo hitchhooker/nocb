@@ -1,5 +1,4 @@
 { pkgs ? import <nixpkgs> {} }:
-
 let
   rust-overlay = import (builtins.fetchTarball {
     url = "https://github.com/oxalica/rust-overlay/archive/master.tar.gz";
@@ -21,10 +20,18 @@ pkgs.mkShell {
     xorg.libXcursor
     xorg.libXrandr
     xorg.libXi
+    
+    # OpenGL/Vulkan support
     libGL
-    libxkbcommon  # Base libxkbcommon
-    mesa          # Add mesa for software rendering
-    mesa.drivers  # Mesa drivers
+    vulkan-loader
+    vulkan-headers
+    vulkan-validation-layers
+    
+    # libxkbcommon
+    libxkbcommon
+    
+    # Mesa
+    mesa
     
     # Optional: for development
     rust-analyzer
@@ -32,15 +39,17 @@ pkgs.mkShell {
     rustfmt
   ];
   
-  # Set up pkg-config paths and library paths
+  # Set up pkg-config paths
   PKG_CONFIG_PATH = "${pkgs.xorg.libxcb}/lib/pkgconfig";
   
-  # Add LD_LIBRARY_PATH to help find libraries
+  # Set LD_LIBRARY_PATH for runtime
   LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
-    pkgs.libxkbcommon
+    pkgs.libGL
     pkgs.xorg.libX11
-    pkgs.xorg.libxcb
-    pkgs.mesa
-    pkgs.mesa.drivers
+    pkgs.xorg.libXcursor
+    pkgs.xorg.libXrandr
+    pkgs.xorg.libXi
+    pkgs.vulkan-loader
+    pkgs.libxkbcommon
   ];
 }

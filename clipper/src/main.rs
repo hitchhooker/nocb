@@ -273,8 +273,12 @@ impl eframe::App for ClipperGui {
 
                                     ui.separator();
 
-                                    // Content preview
-                                    let preview = clip.content.chars().take(80).collect::<String>();
+                                    // Content preview - truncate only for display
+                                    let preview = if clip.content.len() > 80 {
+                                        format!("{}...", clip.content.chars().take(77).collect::<String>())
+                                    } else {
+                                        clip.content.clone()
+                                    };
                                     let label = if is_selected {
                                         ui.colored_label(egui::Color32::BLACK, preview)
                                     } else {
@@ -327,10 +331,9 @@ impl eframe::App for ClipperGui {
 }
 
 fn main() -> Result<(), eframe::Error> {
-    // Force software rendering
+    // Set renderer to glow (OpenGL) which works better in constrained environments
     unsafe {
-        std::env::set_var("LIBGL_ALWAYS_SOFTWARE", "1");
-        std::env::set_var("GALLIUM_DRIVER", "llvmpipe");
+        std::env::set_var("WGPU_BACKEND", "gl");
     }
     
     let options = eframe::NativeOptions {
@@ -338,8 +341,8 @@ fn main() -> Result<(), eframe::Error> {
             .with_inner_size([600.0, 700.0])
             .with_always_on_top()
             .with_decorations(false)
-            .with_transparent(false),
-        hardware_acceleration: eframe::HardwareAcceleration::Off, // Force software rendering
+            .with_transparent(true),
+        renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
 
