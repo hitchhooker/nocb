@@ -67,8 +67,8 @@ jobs:
         if: matrix.os != 'windows-latest'
         run: |
           mkdir -p dist
-          cp core/target/${{ matrix.target }}/release/nocb dist/nocb-${{ matrix.name }}
-          cp clipper/target/${{ matrix.target }}/release/clipper dist/clipper-${{ matrix.name }}
+          cp target/${{ matrix.target }}/release/nocb dist/nocb-${{ matrix.name }}
+          cp target/${{ matrix.target }}/release/clipper dist/clipper-${{ matrix.name }}
           chmod +x dist/*
           cd dist
           sha512sum * > checksums-${{ matrix.name }}.sha512
@@ -77,8 +77,8 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: |
           New-Item -ItemType Directory -Force -Path dist
-          Copy-Item "core/target/${{ matrix.target }}/release/nocb.exe" "dist/nocb-${{ matrix.name }}.exe"
-          Copy-Item "clipper/target/${{ matrix.target }}/release/clipper.exe" "dist/clipper-${{ matrix.name }}.exe"
+          Copy-Item "target/${{ matrix.target }}/release/nocb.exe" "dist/nocb-${{ matrix.name }}.exe"
+          Copy-Item "target/${{ matrix.target }}/release/clipper.exe" "dist/clipper-${{ matrix.name }}.exe"
           cd dist
           Get-ChildItem -Filter *.exe | ForEach-Object { 
             (Get-FileHash $_.Name -Algorithm SHA512).Hash + "  " + $_.Name | Out-File -Append "checksums-${{ matrix.name }}.sha512" -NoNewline
