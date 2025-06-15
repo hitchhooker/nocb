@@ -69,7 +69,12 @@ jobs:
           cp target/${{ matrix.target }}/release/clipper dist/clipper-${{ matrix.name }}
           chmod +x dist/*
           cd dist
-          sha512sum * > checksums-${{ matrix.name }}.sha512
+          if command -v sha512sum &> /dev/null; then
+            sha512sum * > checksums-${{ matrix.name }}.sha512
+          else
+            # macOS uses shasum
+            shasum -a 512 * > checksums-${{ matrix.name }}.sha512
+          fi
 
       - name: Prepare binaries (Windows)
         if: matrix.os == 'windows-latest'
