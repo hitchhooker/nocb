@@ -1,0 +1,50 @@
+[package]
+name = "clipper"
+version = "1.1.2"
+edition = "2021"
+
+[dependencies]
+# Core functionality
+nocb = { path = "../core" }
+crux_core = "0.15"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Error handling
+anyhow = "1.0"
+
+# Thread-safe primitives
+parking_lot = "0.12"
+
+# GUI framework - egui
+egui = "0.28"
+eframe = { version = "0.28", features = ["glow"] }
+
+# System tray support (non-Linux platforms)
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+tray-icon = "0.14"
+
+global-hotkey = "0.2"
+
+[lib]
+name = "clipper"
+path = "src/lib.rs"
+
+[[bin]]
+name = "clipper"
+path = "src/main.rs"
+
+[features]
+default = []
+# Add feature flags if you want optional functionality
+wayland = ["eframe/wayland"]
+x11 = ["eframe/x11"]
+
+# Windows-specific build dependencies for icon
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"

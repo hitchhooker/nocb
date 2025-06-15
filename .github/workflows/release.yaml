@@ -15,7 +15,7 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             name: linux-x64
-          
+
           # macOS
           - os: macos-latest
             target: x86_64-apple-darwin
@@ -23,7 +23,7 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             name: macos-arm64
-          
+
           # Windows
           - os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -54,14 +54,12 @@ jobs:
           brew install gtk+3
 
       - name: Build nocb CLI
-        run: |
-          cd core
-          cargo build --release --target ${{ matrix.target }}
+        working-directory: ./core
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Build clipper GUI
-        run: |
-          cd clipper
-          cargo build --release --target ${{ matrix.target }}
+        working-directory: ./clipper
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Prepare binaries (Unix)
         if: matrix.os != 'windows-latest'
@@ -80,7 +78,7 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/nocb.exe" "dist/nocb-${{ matrix.name }}.exe"
           Copy-Item "target/${{ matrix.target }}/release/clipper.exe" "dist/clipper-${{ matrix.name }}.exe"
           cd dist
-          Get-ChildItem -Filter *.exe | ForEach-Object { 
+          Get-ChildItem -Filter *.exe | ForEach-Object {
             (Get-FileHash $_.Name -Algorithm SHA512).Hash + "  " + $_.Name | Out-File -Append "checksums-${{ matrix.name }}.sha512" -NoNewline
           }
 
@@ -123,7 +121,7 @@ jobs:
       - name: Create Release
         run: |
           cd release
-          
+
           # Create release notes file
           cat > notes.md << 'EOF'
           ## Downloads
@@ -164,7 +162,7 @@ jobs:
           gpg --verify <file>.sig <file>
           ```
           EOF
-          
+
           gh release create ${{ github.ref_name }} \
             --title "nocb ${{ github.ref_name }}" \
             --draft \

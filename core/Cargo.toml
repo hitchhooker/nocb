@@ -1,0 +1,60 @@
+[package]
+name = "nocb"
+version = "1.1.2"
+edition = "2024"
+
+[lib]
+name = "nocb"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nocb"
+path = "src/main.rs"
+
+[dependencies]
+# Error handling
+anyhow = { workspace = true }
+
+# Clipboard access
+arboard = "3.2"
+
+# Hashing
+blake3 = "1.5"
+
+# LRU cache
+lru = "0.12"
+
+# Thread-safe primitives
+parking_lot = { workspace = true }
+
+# Database
+rusqlite = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = "0.8"
+
+# Async runtime
+tokio = { workspace = true }
+
+# Security
+zeroize = "1.7"
+
+# Compression
+zstd = { workspace = true }
+
+# Image processing
+image = { workspace = true }
+
+# System directories
+dirs = "5.0"
+
+clap = { version = "4.5", features = ["derive"] }
+
+# Platform-specific dependencies
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# Windows-specific if needed
