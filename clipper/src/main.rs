@@ -4,6 +4,9 @@ use eframe::egui;
 use parking_lot::Mutex;
 use std::sync::Arc;
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
 // chaOS color scheme
 fn chaos_theme() -> egui::Visuals {
     let mut visuals = egui::Visuals::dark();
@@ -45,7 +48,9 @@ fn chaos_theme() -> egui::Visuals {
 
 // daemon communication
 mod daemon {
-    use std::process::{Command, Stdio};
+    use std::process::Command;
+    #[cfg(not(target_os = "windows"))]
+    use std::process::Stdio;
     use super::ClipEntry;
 
     pub fn ensure_daemon_running() -> Result<(), Box<dyn std::error::Error>> {
@@ -284,7 +289,7 @@ impl eframe::App for ClipperGui {
                     .inner_margin(egui::Margin::symmetric(16.0, 12.0))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.colored_label(pink, " nocb:");
+                            ui.colored_label(pink, "󱞩 nocb:");
 
                             let response = ui.add_sized(
                                 [ui.available_width() - 120.0, 20.0],
@@ -395,38 +400,68 @@ impl eframe::App for ClipperGui {
 
 // system tray support
 #[cfg(not(target_os = "linux"))]
-fn setup_tray(show_window: Arc<Mutex<bool>>) {
+fn setup_tray_and_hotkey(show_window: Arc<Mutex<bool>>) -> Result<(), Box<dyn std::error::Error>> {
     use tray_icon::{Icon, TrayIconBuilder, menu::{Menu, MenuItem}};
+    use global_hotkey::{GlobalHotKeyManager, hotkey::{HotKey, Modifiers, Code}};
     
+    // Create tray menu
+    let menu = Menu::new();
+    let show_item = MenuItem::new("Show Clipper", true, None);
+    let quit_item = MenuItem::new("Quit", true, None);
+    
+    menu.append(&show_item)?;
+    menu.append(&quit_item)?;
+    
+    // Create tray icon (pink square for nocb theme)
+    let mut icon_data = vec![0u8; 32 * 32 * 4];
+    for chunk in icon_data.chunks_mut(4) {
+        chunk[0] = 0xE6; // R
+        chunk[1] = 0x00; // G
+        chunk[2] = 0x7A; // B
+        chunk[3] = 0xFF; // A
+    }
+    let icon = Icon::from_rgba(icon_data, 32, 32)?;
+    
+    let _tray = TrayIconBuilder::new()
+        .with_menu(Box::new(menu))
+        .with_tooltip("Clipper - Clipboard Manager")
+        .with_icon(icon)
+        .build()?;
+    
+    // Setup global hotkey (Win+B)
+    let manager = GlobalHotKeyManager::new()?;
+    let hotkey = HotKey::new(
+        Some(Modifiers::SUPER), // Windows/Command key
+        Code::KeyB
+    );
+    manager.register(hotkey)?;
+    
+    // Spawn thread to handle tray and hotkey events
     std::thread::spawn(move || {
-        let menu = Menu::new();
-        let show_item = MenuItem::new("Show Clipper", true, None);
-        let quit_item = MenuItem::new("Quit", true, None);
-        
-        menu.append(&show_item).unwrap();
-        menu.append(&quit_item).unwrap();
-        
-        let icon = Icon::from_rgba(vec![255; 32 * 32 * 4], 32, 32).unwrap();
-        
-        let tray = TrayIconBuilder::new()
-            .with_menu(Box::new(menu))
-            .with_tooltip("Clipper - Clipboard Manager")
-            .with_icon(icon)
-            .build()
-            .unwrap();
-        
         let menu_channel = tray_icon::menu::MenuEvent::receiver();
+        let hotkey_channel = global_hotkey::GlobalHotKeyEvent::receiver();
         
         loop {
-            if let Ok(event) = menu_channel.recv() {
+            // Check for menu events
+            if let Ok(event) = menu_channel.try_recv() {
                 if event.id == show_item.id() {
                     *show_window.lock() = true;
                 } else if event.id == quit_item.id() {
                     std::process::exit(0);
                 }
             }
+            
+            // Check for hotkey events
+            if let Ok(_event) = hotkey_channel.try_recv() {
+                let mut window_visible = show_window.lock();
+                *window_visible = !*window_visible; // Toggle visibility
+            }
+            
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
     });
+    
+    Ok(())
 }
 
 fn main() -> Result<(), eframe::Error> {
@@ -435,17 +470,22 @@ fn main() -> Result<(), eframe::Error> {
         std::env::set_var("WGPU_BACKEND", "gl");
     }
 
-    let show_window = Arc::new(Mutex::new(true));
+    let show_window = Arc::new(Mutex::new(false)); // Start hidden
     
     #[cfg(not(target_os = "linux"))]
-    setup_tray(show_window.clone());
+    {
+        if let Err(e) = setup_tray_and_hotkey(show_window.clone()) {
+            eprintln!("Failed to setup tray/hotkey: {}", e);
+        }
+    }
     
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([600.0, 700.0])
             .with_always_on_top()
             .with_decorations(false)
-            .with_transparent(true),
+            .with_transparent(true)
+            .with_visible(false), // Start hidden
         renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
