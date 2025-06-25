@@ -982,7 +982,7 @@ impl ClipboardManager {
 
     async fn copy_selection(&mut self, selection: &str) -> Result<()> {
         // extract hash from #hash format anywhere in string
-        if let Some(hash_pos) = selection.find('#') {
+        if let Some(hash_pos) = selection.rfind('#') {
             let hash_start = hash_pos + 1;
             let hash_end = selection[hash_start..]
                 .find(|c: char| c.is_whitespace())
