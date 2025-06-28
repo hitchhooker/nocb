@@ -59,7 +59,12 @@ impl App for ClipperApp {
     type Capabilities = Capabilities;
     type Effect = Effect;
 
-    fn update(&self, event: Self::Event, model: &mut Self::Model, caps: &Self::Capabilities) -> Command<Self::Effect, Self::Event> {
+    fn update(
+        &self,
+        event: Self::Event,
+        model: &mut Self::Model,
+        caps: &Self::Capabilities,
+    ) -> Command<Self::Effect, Self::Event> {
         match event {
             Event::Init | Event::RefreshClips => {
                 caps.render.render();
@@ -118,9 +123,7 @@ impl App for ClipperApp {
                         }
                         Command::done()
                     }
-                    Key::Enter => {
-                        self.update(Event::CopyClip(model.selected_index), model, caps)
-                    }
+                    Key::Enter => self.update(Event::CopyClip(model.selected_index), model, caps),
                     Key::Escape => {
                         // Handle in shell (close window)
                         Command::done()
@@ -141,7 +144,8 @@ impl ClipperApp {
             model.clips.clone()
         } else {
             let query = model.search_query.to_lowercase();
-            model.clips
+            model
+                .clips
                 .iter()
                 .filter(|clip| clip.content.to_lowercase().contains(&query))
                 .cloned()
