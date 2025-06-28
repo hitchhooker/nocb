@@ -20,7 +20,7 @@ const HASH_PREFIX_LEN: usize = 8;
 const MAX_CLIPBOARD_SIZE: usize = 100 * 1024 * 1024; // 100MB
 const MAX_IPC_MESSAGE_SIZE: usize = 4096;
 const IPC_MAGIC: &[u8] = b"NOCB\x00\x01";
-const LRU_CACHE_SIZE: usize = 64; // Increased for better hit rate
+const LRU_CACHE_SIZE: usize = 64;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -32,7 +32,11 @@ pub struct Config {
     pub trim_whitespace: bool,
     pub static_entries: Vec<String>,
     pub compress_threshold: usize,
+    #[serde(default = "default_max_age_days")]
+    pub max_age_days: u32,
 }
+
+fn default_max_age_days() -> u32 { 30 }
 
 impl Default for Config {
     fn default() -> Self {
@@ -49,6 +53,7 @@ impl Default for Config {
             trim_whitespace: true,
             static_entries: Vec::new(),
             compress_threshold: 4096,
+            max_age_days: 30,
         }
     }
 }
@@ -175,7 +180,8 @@ impl ClipboardManager {
              PRAGMA synchronous = NORMAL;
              PRAGMA cache_size = -64000;
              PRAGMA mmap_size = 268435456;
-             PRAGMA temp_store = MEMORY;"
+             PRAGMA temp_store = MEMORY;
+             PRAGMA foreign_keys = ON;"
         )?;
 
         db.execute_batch(
@@ -254,6 +260,7 @@ impl ClipboardManager {
                     }
 
                     cleanup_counter += 1;
+                    // Run cleanup every ~100 seconds
                     if cleanup_counter % 1000 == 0 {
                         let _ = self.cleanup_old_entries();
                     }
@@ -298,21 +305,17 @@ impl ClipboardManager {
             loop {
                 let (mut stream, _addr) = listener.accept().await?;
 
-                // peer uid verification on linux
+                // Simple UID check on Linux
                 #[cfg(target_os = "linux")]
                 {
                     match stream.peer_cred() {
                         Ok(cred) => {
                             let current_uid = unsafe { libc::getuid() };
                             if cred.uid() != current_uid {
-                                eprintln!("IPC rejected: different UID ({} != {})", cred.uid(), current_uid);
                                 continue;
                             }
                         }
-                        Err(e) => {
-                            eprintln!("Failed to get peer credentials: {}", e);
-                            continue;
-                        }
+                        Err(_) => continue,
                     }
                 }
 
@@ -691,6 +694,7 @@ impl ClipboardManager {
     }
 
     fn cleanup_old_entries(&mut self) -> Result<()> {
+        // Clean by max entries
         let mut stmt = self.db.prepare(
             "SELECT hash FROM entries 
              WHERE id NOT IN (
@@ -705,8 +709,31 @@ impl ClipboardManager {
 
         drop(stmt);
 
-        for hash in &hashes_to_delete {
-            self.delete_entry(hash)?;
+        // Clean by age
+        let cutoff = SystemTime::now()
+            .duration_since(UNIX_EPOCH)?
+            .as_secs() - (self.config.max_age_days as u64 * 86400);
+
+        let mut stmt = self.db.prepare(
+            "SELECT hash FROM entries WHERE timestamp < ?1"
+        )?;
+        
+        let old_hashes: Vec<String> = stmt.query_map(
+            params![cutoff as i64],
+            |row| row.get(0)
+        )?.collect::<Result<Vec<_>, _>>()?;
+
+        drop(stmt);
+
+        // Delete all collected hashes
+        for hash in hashes_to_delete.into_iter().chain(old_hashes) {
+            self.delete_entry(&hash)?;
+        }
+
+        // VACUUM occasionally (every 100 cleanups)
+        static VACUUM_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        if VACUUM_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 100 == 0 {
+            let _ = self.db.execute("VACUUM", []);
         }
 
         Ok(())
