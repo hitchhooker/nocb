@@ -358,6 +358,24 @@ impl ClipboardManager {
                             if let Ok(cmd) = String::from_utf8(buf[IPC_MAGIC.len()..n].to_vec()) {
                                 let cmd = cmd.trim();
                                 if cmd.starts_with("COPY:") {
+                                } else if cmd == "CLEAR" {
+                                    let _ = tx.send(Command::Clear).await;
+                                } else if cmd.starts_with("PRUNE:") {
+                                    let hashes_str = cmd[6..].to_string();
+                                    let hashes: Vec<String> = hashes_str
+                                        .split(',')
+                                        .map(|s| s.trim().to_string())
+                                        .collect();
+                                    let _ = tx.send(Command::Prune(hashes)).await;
+                                } else if cmd == "CLEAR" {
+                                    let _ = tx.send(Command::Clear).await;
+                                } else if cmd.starts_with("PRUNE:") {
+                                    let hashes_str = cmd[6..].to_string();
+                                    let hashes: Vec<String> = hashes_str
+                                        .split(',')
+                                        .map(|s| s.trim().to_string())
+                                        .collect();
+                                    let _ = tx.send(Command::Prune(hashes)).await;
                                     let selection = cmd[5..].to_string();
                                     let _ = tx.send(Command::Copy(selection)).await;
                                 }
@@ -397,6 +415,24 @@ impl ClipboardManager {
                             if let Ok(cmd) = String::from_utf8(buf[IPC_MAGIC.len()..n].to_vec()) {
                                 let cmd = cmd.trim();
                                 if cmd.starts_with("COPY:") {
+                                } else if cmd == "CLEAR" {
+                                    let _ = tx.send(Command::Clear).await;
+                                } else if cmd.starts_with("PRUNE:") {
+                                    let hashes_str = cmd[6..].to_string();
+                                    let hashes: Vec<String> = hashes_str
+                                        .split(',')
+                                        .map(|s| s.trim().to_string())
+                                        .collect();
+                                    let _ = tx.send(Command::Prune(hashes)).await;
+                                } else if cmd == "CLEAR" {
+                                    let _ = tx.send(Command::Clear).await;
+                                } else if cmd.starts_with("PRUNE:") {
+                                    let hashes_str = cmd[6..].to_string();
+                                    let hashes: Vec<String> = hashes_str
+                                        .split(',')
+                                        .map(|s| s.trim().to_string())
+                                        .collect();
+                                    let _ = tx.send(Command::Prune(hashes)).await;
                                     let selection = cmd[5..].to_string();
                                     let _ = tx.send(Command::Copy(selection)).await;
                                 }

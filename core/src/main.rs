@@ -92,13 +92,11 @@ async fn main() -> Result<()> {
             ClipboardManager::send_copy_command(&selection).await?;
         }
         Commands::Clear => {
-            let mut manager = ClipboardManager::new(config).await?;
-            manager.clear()?;
-            println!("Clipboard history cleared");
+            nocb::ClipboardManager::send_command("CLEAR").await?;
+
+            println!("Clear command sent to daemon");
         }
         Commands::Prune { input } => {
-            let mut manager = ClipboardManager::new(config).await?;
-
             let hashes = if input.len() == 1 && PathBuf::from(&input[0]).exists() {
                 let content =
                     std::fs::read_to_string(&input[0]).context("Failed to read hash file")?;
@@ -107,8 +105,8 @@ async fn main() -> Result<()> {
                 input
             };
 
-            manager.prune(&hashes)?;
-            println!("Pruned {} entries", hashes.len());
+            nocb::ClipboardManager::send_command(&format!("PRUNE:{}", hashes.join(","))).await?;
+            println!("Prune command sent to daemon for {} entries", hashes.len());
         }
     }
 
