@@ -1031,7 +1031,8 @@ impl ClipboardManager {
                         if let Some(text) = inline_text {
                             let available_chars = 80 - time_str.len() - 1 - 9 - 1;
                             let display = self.truncate_to_fit(&text, available_chars);
-                            println!("{} {} #{}", time_str, display, hash_prefix);
+                            let line = format!("{} {}", time_str, display);
+                            println!("{:<70} #{}", line, hash_prefix);
                         }
                     }
                     "text_file" => {
@@ -1049,7 +1050,8 @@ impl ClipboardManager {
                                     time_str, display, size_str, hash_prefix
                                 );
                             } else {
-                                println!("{} [Text: {}] #{}", time_str, size_str, hash_prefix);
+                                let line = format!("{} [Text: {}]", time_str, size_str);
+                                println!("{:<70} #{}", line, hash_prefix);
                             }
                         }
                     }
@@ -1105,7 +1107,8 @@ impl ClipboardManager {
                 if let Some(text) = &cached.inline_text {
                     let available_chars = 80 - time_str.len() - 1 - 9 - 1;
                     let display = self.truncate_to_fit(text, available_chars);
-                    println!("{} {} #{}", time_str, display, hash_prefix);
+                    let line = format!("{} {}", time_str, display);
+                    println!("{:<70} #{}", line, hash_prefix);
                 }
             }
             "text_file" => {
@@ -1117,9 +1120,11 @@ impl ClipboardManager {
                         .filter(|p| !p.is_empty());
 
                     if let Some(display) = preview {
-                        println!("{} {} [{}] #{}", time_str, display, size_str, hash_prefix);
+                        let line = format!("{} {} [{}]", time_str, display, size_str);
+                        println!("{:<70} #{}", line, hash_prefix);
                     } else {
-                        println!("{} [Text: {}] #{}", time_str, size_str, hash_prefix);
+                        let line = format!("{} [Text: {}]", time_str, size_str);
+                        println!("{:<70} #{}", line, hash_prefix);
                     }
                 }
             }
@@ -1164,7 +1169,7 @@ impl ClipboardManager {
         if text.len() <= max_chars {
             text
         } else {
-            let mut end = max_chars.saturating_sub(1);
+            let mut end = max_chars.saturating_sub(1).min(text.len());
             while !text.is_char_boundary(end) && end > 0 {
                 end -= 1;
             }
