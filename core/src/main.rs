@@ -23,7 +23,7 @@ enum Commands {
     Copy {
         /// Selection text or image reference to copy
         #[arg(trailing_var_arg = true)]
-        selection: Vec<String>
+        selection: Vec<String>,
     },
     /// Clear clipboard history
     Clear,
@@ -31,7 +31,7 @@ enum Commands {
     Prune {
         /// File containing hash list or direct hashes
         #[arg(value_name = "HASHES")]
-        input: Vec<String>
+        input: Vec<String>,
     },
 }
 
@@ -100,8 +100,8 @@ async fn main() -> Result<()> {
             let mut manager = ClipboardManager::new(config).await?;
 
             let hashes = if input.len() == 1 && PathBuf::from(&input[0]).exists() {
-                let content = std::fs::read_to_string(&input[0])
-                    .context("Failed to read hash file")?;
+                let content =
+                    std::fs::read_to_string(&input[0]).context("Failed to read hash file")?;
                 content.lines().map(|s| s.trim().to_string()).collect()
             } else {
                 input
