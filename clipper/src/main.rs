@@ -65,7 +65,7 @@ mod daemon {
                         .arg("daemon")
                         .creation_flags(0x08000000) // CREATE_NO_WINDOW
                         .spawn()?;
-                }
+                    }
 
                 #[cfg(not(target_os = "windows"))]
                 {
@@ -74,7 +74,7 @@ mod daemon {
                         .stdout(Stdio::null())
                         .stderr(Stdio::null())
                         .spawn()?;
-                }
+                    }
 
                 // wait for daemon to start
                 std::thread::sleep(std::time::Duration::from_millis(500));
@@ -281,8 +281,8 @@ impl eframe::App for ClipperGui {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::none()
-                    .fill(egui::Color32::from_rgba_unmultiplied(0, 0, 0, 0xCC))
-                    .inner_margin(egui::Margin::same(24.0)),
+                .fill(egui::Color32::from_rgba_unmultiplied(0, 0, 0, 0xCC))
+                .inner_margin(egui::Margin::same(24.0)),
             )
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 16.0);
@@ -303,16 +303,16 @@ impl eframe::App for ClipperGui {
                             let response = ui.add_sized(
                                 [ui.available_width() - 120.0, 20.0],
                                 egui::TextEdit::singleline(&mut self.model.search_query)
-                                    .font(egui::TextStyle::Monospace)
-                                    .hint_text("Type to search...")
-                                    .desired_width(f32::INFINITY),
+                                .font(egui::TextStyle::Monospace)
+                                .hint_text("Type to search...")
+                                .desired_width(f32::INFINITY),
                             );
 
                             response.request_focus();
 
                             if response.changed() {
                                 self.process_event(Event::UpdateSearch(
-                                    self.model.search_query.clone(),
+                                        self.model.search_query.clone(),
                                 ));
                             }
 
@@ -349,7 +349,7 @@ impl eframe::App for ClipperGui {
                                 frame = frame.fill(pink);
                             } else if index % 2 == 1 {
                                 frame = frame.fill(egui::Color32::from_rgba_unmultiplied(
-                                    0x1A, 0x1B, 0x26, 0x11,
+                                        0x1A, 0x1B, 0x26, 0x11,
                                 ));
                             }
 
@@ -389,7 +389,7 @@ impl eframe::App for ClipperGui {
                                         label
                                     })
                                 })
-                                .inner;
+                            .inner;
 
                             if response.response.clicked() {
                                 self.process_event(Event::SelectIndex(index));
@@ -443,6 +443,10 @@ fn setup_tray_and_hotkey(show_window: Arc<Mutex<bool>>) -> Result<(), Box<dyn st
     menu.append(&show_item)?;
     menu.append(&quit_item)?;
 
+    // Store IDs instead of items
+    let show_id = show_item.id().clone();
+    let quit_id = quit_item.id().clone();
+
     // Create tray icon (pink square for nocb theme)
     let mut icon_data = vec![0u8; 32 * 32 * 4];
     for chunk in icon_data.chunks_mut(4) {
@@ -467,7 +471,7 @@ fn setup_tray_and_hotkey(show_window: Arc<Mutex<bool>>) -> Result<(), Box<dyn st
     );
     manager.register(hotkey)?;
 
-    // Spawn thread to handle tray and hotkey events
+    // Spawn thread with only the IDs
     std::thread::spawn(move || {
         let menu_channel = tray_icon::menu::MenuEvent::receiver();
         let hotkey_channel = global_hotkey::GlobalHotKeyEvent::receiver();
@@ -475,9 +479,9 @@ fn setup_tray_and_hotkey(show_window: Arc<Mutex<bool>>) -> Result<(), Box<dyn st
         loop {
             // Check for menu events
             if let Ok(event) = menu_channel.try_recv() {
-                if event.id == show_item.id() {
+                if event.id == show_id {
                     *show_window.lock() = true;
-                } else if event.id == quit_item.id() {
+                } else if event.id == quit_id {
                     std::process::exit(0);
                 }
             }
