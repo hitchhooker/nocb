@@ -15,7 +15,6 @@ fn chaos_theme() -> egui::Visuals {
     let bg = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 0xCC);
     let bg_alt = egui::Color32::from_rgb(0x1A, 0x1B, 0x26);
 
-    // widget visuals
     visuals.widgets.noninteractive.bg_fill = bg_alt;
     visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(2.0, pink);
     visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, pink);
@@ -46,21 +45,17 @@ fn chaos_theme() -> egui::Visuals {
     visuals
 }
 
-// daemon communication
 mod daemon {
     use super::ClipEntry;
     use std::process::Command;
-    #[cfg(not(target_os = "windows"))]
-    use std::process::Stdio;
 
     pub fn ensure_daemon_running() -> Result<(), Box<dyn std::error::Error>> {
-        // check if daemon is running by trying to connect
         match send_command("") {
             Ok(_) => Ok(()),
             Err(_) => {
-                // start daemon
                 #[cfg(target_os = "windows")]
                 {
+                    use std::os::windows::process::CommandExt;
                     Command::new("nocb")
                         .arg("daemon")
                         .creation_flags(0x08000000) // CREATE_NO_WINDOW
@@ -69,6 +64,7 @@ mod daemon {
 
                 #[cfg(not(target_os = "windows"))]
                 {
+                    use std::process::Stdio;
                     Command::new("nocb")
                         .arg("daemon")
                         .stdout(Stdio::null())
@@ -76,7 +72,6 @@ mod daemon {
                         .spawn()?;
                     }
 
-                // wait for daemon to start
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 Ok(())
             }
@@ -94,7 +89,6 @@ mod daemon {
                 continue;
             }
 
-            // parse line format: "3m content... #hash"
             let parts: Vec<&str> = line.splitn(2, ' ').collect();
             if parts.len() < 2 {
                 continue;
@@ -103,7 +97,6 @@ mod daemon {
             let time_ago = parts[0].to_string();
             let rest = parts[1];
 
-            // extract hash
             let hash_pos = rest.rfind('#').unwrap_or(rest.len());
             let content = rest[..hash_pos].trim();
             let hash = if hash_pos < rest.len() {
@@ -112,7 +105,6 @@ mod daemon {
                 format!("unknown{}", id)
             };
 
-            // detect type and size
             let (entry_type, size_str, display_content) = if content.starts_with("[IMG:") {
                 (
                     "image".to_string(),
@@ -120,7 +112,6 @@ mod daemon {
                     content.to_string(),
                 )
             } else if content.contains(" [") && content.ends_with(']') {
-                // large text with size
                 let bracket_pos = content.rfind(" [").unwrap_or(content.len());
                 let text_part = &content[..bracket_pos];
                 let size_part = &content[bracket_pos + 2..content.len() - 1];
@@ -147,7 +138,6 @@ mod daemon {
     }
 
     fn parse_size_from_image(content: &str) -> Option<String> {
-        // parse "[IMG:1920x1080px png 256K]" format
         if let Some(start) = content.find(' ') {
             if let Some(end) = content.rfind(' ') {
                 if end > start {
@@ -174,7 +164,6 @@ impl ClipperGui {
     fn new(cc: &eframe::CreationContext<'_>, show_window: Arc<Mutex<bool>>) -> Self {
         cc.egui_ctx.set_visuals(chaos_theme());
 
-        // ensure daemon is running
         if let Err(e) = daemon::ensure_daemon_running() {
             eprintln!("Failed to start daemon: {}", e);
         }
@@ -218,7 +207,6 @@ impl ClipperGui {
             }
             Err(e) => {
                 eprintln!("Failed to load clips: {}", e);
-                // show error in UI
                 self.process_event(Event::ClipsLoaded(vec![ClipEntry {
                     id: 0,
                     hash: "error".to_string(),
@@ -232,7 +220,6 @@ impl ClipperGui {
     }
 
     fn copy_to_clipboard(&mut self, clip: &ClipEntry) {
-        // send the full line from nocb print output to nocb copy
         let selection = if clip.size_str.is_some() {
             format!(
                 "{} {} [{}] #{}",
@@ -266,13 +253,11 @@ impl ClipperGui {
 
 impl eframe::App for ClipperGui {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // check if we should show window
         if !*self.show_window.lock() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
             return;
         }
 
-        // handle keyboard shortcuts
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             *self.show_window.lock() = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -287,7 +272,6 @@ impl eframe::App for ClipperGui {
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 16.0);
 
-                // search bar
                 let bg_alt = egui::Color32::from_rgb(0x1A, 0x1B, 0x26);
                 let pink = egui::Color32::from_rgb(0xE6, 0x00, 0x7A);
                 let cyan = egui::Color32::from_rgb(0x00, 0xFF, 0xE1);
@@ -333,7 +317,6 @@ impl eframe::App for ClipperGui {
 
                 ui.add_space(8.0);
 
-                // clips list
                 let clips = self.filtered_clips();
                 egui::ScrollArea::vertical()
                     .auto_shrink([false; 2])
@@ -404,7 +387,6 @@ impl eframe::App for ClipperGui {
                         }
                     });
 
-                // handle arrow keys
                 if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
                     self.process_event(Event::KeyPress(Key::Up));
                 }
@@ -418,12 +400,10 @@ impl eframe::App for ClipperGui {
                 }
             });
 
-        // auto-refresh
         ctx.request_repaint_after(std::time::Duration::from_secs(5));
     }
 }
 
-// system tray support
 #[cfg(not(target_os = "linux"))]
 fn setup_tray_and_hotkey(show_window: Arc<Mutex<bool>>) -> Result<(), Box<dyn std::error::Error>> {
     use global_hotkey::{
@@ -435,7 +415,6 @@ fn setup_tray_and_hotkey(show_window: Arc<Mutex<bool>>) -> Result<(), Box<dyn st
         Icon, TrayIconBuilder,
     };
 
-    // Create tray menu
     let menu = Menu::new();
     let show_item = MenuItem::new("Show Clipper", true, None);
     let quit_item = MenuItem::new("Quit", true, None);
@@ -443,11 +422,9 @@ fn setup_tray_and_hotkey(show_window: Arc<Mutex<bool>>) -> Result<(), Box<dyn st
     menu.append(&show_item)?;
     menu.append(&quit_item)?;
 
-    // Store IDs instead of items
     let show_id = show_item.id().clone();
     let quit_id = quit_item.id().clone();
 
-    // Create tray icon (pink square for nocb theme)
     let mut icon_data = vec![0u8; 32 * 32 * 4];
     for chunk in icon_data.chunks_mut(4) {
         chunk[0] = 0xE6; // R
@@ -463,21 +440,18 @@ fn setup_tray_and_hotkey(show_window: Arc<Mutex<bool>>) -> Result<(), Box<dyn st
         .with_icon(icon)
         .build()?;
 
-    // Setup global hotkey (Win+B)
     let manager = GlobalHotKeyManager::new()?;
     let hotkey = HotKey::new(
-        Some(Modifiers::SUPER), // Windows/Command key
+        Some(Modifiers::SUPER),
         Code::KeyB,
     );
     manager.register(hotkey)?;
 
-    // Spawn thread with only the IDs
     std::thread::spawn(move || {
         let menu_channel = tray_icon::menu::MenuEvent::receiver();
         let hotkey_channel = global_hotkey::GlobalHotKeyEvent::receiver();
 
         loop {
-            // Check for menu events
             if let Ok(event) = menu_channel.try_recv() {
                 if event.id == show_id {
                     *show_window.lock() = true;
@@ -486,10 +460,9 @@ fn setup_tray_and_hotkey(show_window: Arc<Mutex<bool>>) -> Result<(), Box<dyn st
                 }
             }
 
-            // Check for hotkey events
             if let Ok(_event) = hotkey_channel.try_recv() {
                 let mut window_visible = show_window.lock();
-                *window_visible = !*window_visible; // Toggle visibility
+                *window_visible = !*window_visible;
             }
 
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -500,12 +473,11 @@ fn setup_tray_and_hotkey(show_window: Arc<Mutex<bool>>) -> Result<(), Box<dyn st
 }
 
 fn main() -> Result<(), eframe::Error> {
-    // force opengl renderer
     unsafe {
         std::env::set_var("WGPU_BACKEND", "gl");
     }
 
-    let show_window = Arc::new(Mutex::new(false)); // Start hidden
+    let show_window = Arc::new(Mutex::new(false));
 
     #[cfg(not(target_os = "linux"))]
     {
@@ -520,9 +492,9 @@ fn main() -> Result<(), eframe::Error> {
             .with_always_on_top()
             .with_decorations(false)
             .with_transparent(true)
-            .with_visible(false), // Start hidden
-        renderer: eframe::Renderer::Glow,
-        ..Default::default()
+            .with_visible(false),
+            renderer: eframe::Renderer::Glow,
+            ..Default::default()
     };
 
     let show_window_clone = show_window.clone();
