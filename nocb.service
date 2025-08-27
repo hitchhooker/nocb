@@ -1,0 +1,13 @@
+[Unit]
+Description=NOCB Clipboard Manager
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/home/alice/.local/bin/nocb daemon
+Restart=on-failure
+RestartSec=5
+Environment="DISPLAY=:0"
+
+[Install]
+WantedBy=default.target

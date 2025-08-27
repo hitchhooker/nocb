@@ -1238,9 +1238,9 @@ impl ClipboardManager {
     pub fn clear(&mut self) -> Result<()> {
         self.last_clipboard_hash = None;
         self.cache.clear();
-        self.last_clipboard_hash = None;
-        self.clipboard.write().set_text("").ok();
-        if let Some(mut clipboard) = self.clipboard.try_write() {
+
+        {
+            let mut clipboard = self.clipboard.write();
             let _ = clipboard.set_text("");
         }
 
@@ -1248,11 +1248,33 @@ impl ClipboardManager {
         let all_hashes: Vec<String> = stmt
             .query_map([], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?;
-
         drop(stmt);
 
         for hash in &all_hashes {
             self.delete_entry(hash)?;
+        }
+
+        self.db.execute("VACUUM", [])?;
+
+        let blobs_dir = self.config.cache_dir.join("blobs");
+        if blobs_dir.exists() {
+            for entry in fs::read_dir(&blobs_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_file() {
+                    let _ = fs::remove_file(path);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn purge_all(&mut self) -> Result<()> {
+        self.clear()?;
+
+        if self.config.cache_dir.exists() {
+            fs::remove_dir_all(&self.config.cache_dir)?;
         }
 
         Ok(())
